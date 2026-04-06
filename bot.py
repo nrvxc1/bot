@@ -6,11 +6,11 @@ import string
 import requests
 import re
 import cloudscraper
+import os
+import json
 from bs4 import BeautifulSoup
 from telebot import types
 from datetime import datetime
-import os
-import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -47,7 +47,7 @@ vowels = 'aeiouy'
 all_letters = string.ascii_lowercase
 digits = '0123456789'
 
-# ========== БАЗА ДАННЫХ ==========
+# ========== БАЗА ДАННЫХ (ПАПКА data) ==========
 checked_usernames = set()
 available_usernames = set()
 user_stats = {}
@@ -56,37 +56,50 @@ search_active = {}
 scraper = cloudscraper.create_scraper()
 executor = ThreadPoolExecutor(max_workers=15)
 
-print("🔄 Загружаю данные...")
+# Создаём папку для данных, если её нет
+if not os.path.exists('data'):
+    os.makedirs('data')
+
+def ensure_files():
+    for f in ['checked.txt', 'found.txt', 'users.json']:
+        path = os.path.join('data', f)
+        if not os.path.exists(path):
+            with open(path, 'w') as file:
+                if f.endswith('.json'):
+                    file.write('{}')
+                else:
+                    file.write('')
 
 def load_data():
     global checked_usernames, available_usernames, user_stats
+    ensure_files()
     try:
-        with open('checked.txt', 'r') as f:
+        with open('data/checked.txt', 'r') as f:
             checked_usernames = set(line.strip().replace('@', '') for line in f)
         print(f"📂 Загружено проверенных: {len(checked_usernames)}")
     except:
         checked_usernames = set()
     try:
-        with open('found.txt', 'r') as f:
+        with open('data/found.txt', 'r') as f:
             available_usernames = set(line.strip().replace('@', '') for line in f)
         print(f"📂 Загружено найденных: {len(available_usernames)}")
     except:
         available_usernames = set()
     try:
-        with open('users.json', 'r') as f:
+        with open('data/users.json', 'r') as f:
             user_stats = json.load(f)
         print(f"📂 Загружено пользователей: {len(user_stats)}")
     except:
         user_stats = {}
 
 def save_data():
-    with open('checked.txt', 'w') as f:
+    with open('data/checked.txt', 'w') as f:
         for username in checked_usernames:
             f.write(f"@{username}\n")
-    with open('found.txt', 'w') as f:
+    with open('data/found.txt', 'w') as f:
         for username in available_usernames:
             f.write(f"@{username}\n")
-    with open('users.json', 'w') as f:
+    with open('data/users.json', 'w') as f:
         json.dump(user_stats, f, indent=2, ensure_ascii=False)
 
 # ========== ФУНКЦИИ ПОЛЬЗОВАТЕЛЕЙ ==========
@@ -94,17 +107,30 @@ def get_user_info(user):
     user_id = str(user.id)
     username = f"@{user.username}" if user.username else "без юзернейма"
     if user_id not in user_stats:
-        user_stats[user_id] = {
-            'first_seen': datetime.now().isoformat(),
-            'searches_left': 1,
-            'total_searches': 0,
-            'found': 0,
-            'unlimited': False,
-            'username': username,
-            'purchases': []
-        }
-        save_data()
-        print(f"👤 Новый пользователь: {user_id}")
+        try:
+            user_stats[user_id] = {
+                'first_seen': datetime.now().isoformat(),
+                'searches_left': 1,
+                'total_searches': 0,
+                'found': 0,
+                'unlimited': False,
+                'username': username,
+                'purchases': []
+            }
+            save_data()
+            print(f"👤 Новый пользователь: {user_id}")
+        except Exception as e:
+            print(f"❌ Ошибка при создании пользователя {user_id}: {e}")
+            # временная запись без сохранения
+            user_stats[user_id] = {
+                'first_seen': datetime.now().isoformat(),
+                'searches_left': 1,
+                'total_searches': 0,
+                'found': 0,
+                'unlimited': False,
+                'username': username,
+                'purchases': []
+            }
     return {
         'id': user_id,
         'username': username,
@@ -271,7 +297,7 @@ def check_username_complete(username):
 def check_username_parallel(username):
     return username, check_username_complete(username)
 
-# ========== ПОИСК 3 НИКОВ ==========
+# ========== ПОИСК 3 НИКОВ ЗА 1 ЗАПРОС ==========
 def search_three_usernames(chat_id, mode, mode_name, user_info, length):
     user_id = user_info['id']
     search_active[user_id] = True
@@ -395,7 +421,7 @@ def handle_callback(call):
             show_payment_instruction(chat_id, user_info, tariff_key)
         elif call.data.startswith("confirm_payment_"):
             tariff_key = call.data.replace("confirm_payment_", "")
-            amount = int(PRICES[tariff_key])  # преобразуем в int
+            amount = int(PRICES[tariff_key])
             tariff = TARIFFS[amount]
             admin_markup = types.InlineKeyboardMarkup(row_width=2)
             admin_markup.add(
