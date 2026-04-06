@@ -22,7 +22,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 BOT_TOKEN = "8442771928:AAEsiakjmFbJFDrCTGofcK4G-JysbSg84Hw"
 bot = telebot.TeleBot(BOT_TOKEN)
 
-ADMIN_ID = 8195214444, 8746165041, 6660631707
+ADMIN_ID = 8746165041
 SUPPORT_USERNAME = "@supp0rt_tagforce"
 
 # Цены на запросы
