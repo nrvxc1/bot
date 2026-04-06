@@ -25,14 +25,7 @@ bot = telebot.TeleBot(BOT_TOKEN)
 ADMIN_ID = 8746165041
 SUPPORT_USERNAME = "@supp0rt_tagforce"
 
-# Цены на запросы
-PRICES = {
-    "1": 30,
-    "3": 90,
-    "10": 250,
-    "unlimited": 1000
-}
-
+PRICES = {"1": 30, "3": 90, "10": 250, "unlimited": 1000}
 TARIFFS = {
     30: {"name": "1 поиск", "key": "1", "searches": 1, "unlimited": False},
     90: {"name": "3 поиска", "key": "3", "searches": 3, "unlimited": False},
@@ -115,11 +108,6 @@ def get_user_info(user):
             }
             save_data()
             print(f"👤 Новый пользователь: {user_id}")
-            # Отправляем приветствие новому пользователю
-            try:
-                bot.send_message(int(user_id), "🎉 Добро пожаловать! У тебя есть 1 бесплатный поиск (3 ника). Используй кнопки ниже.")
-            except:
-                pass
         except Exception as e:
             print(f"❌ Ошибка при создании пользователя {user_id}: {e}")
             user_stats[user_id] = {
@@ -139,33 +127,24 @@ def get_user_info(user):
     }
 
 def can_search(user_info):
-    stats = user_info['stats']
-    return stats['unlimited'] or stats['searches_left'] > 0
+    return user_info['stats']['unlimited'] or user_info['stats']['searches_left'] > 0
 
 def add_searches(user_id, amount):
     if amount in TARIFFS:
         tariff = TARIFFS[amount]
         if user_id not in user_stats:
             user_stats[user_id] = {
-                'searches_left': 0,
-                'total_searches': 0,
-                'found': 0,
-                'unlimited': False,
-                'purchases': []
+                'searches_left': 0, 'total_searches': 0, 'found': 0, 'unlimited': False, 'purchases': []
             }
         if tariff['unlimited']:
             user_stats[user_id]['unlimited'] = True
             user_stats[user_id]['searches_left'] = 0
-            msg = f"🎉 БЕЗЛИМИТ АКТИВИРОВАН!"
+            msg = "🎉 БЕЗЛИМИТ АКТИВИРОВАН!"
         else:
             user_stats[user_id]['searches_left'] += tariff['searches']
             msg = f"✅ ОПЛАЧЕНО! Начислено {tariff['searches']} поисков."
-        if 'purchases' not in user_stats[user_id]:
-            user_stats[user_id]['purchases'] = []
-        user_stats[user_id]['purchases'].append({
-            'date': datetime.now().isoformat(),
-            'amount': amount,
-            'tariff': tariff['name']
+        user_stats[user_id].setdefault('purchases', []).append({
+            'date': datetime.now().isoformat(), 'amount': amount, 'tariff': tariff['name']
         })
         save_data()
         try:
@@ -180,48 +159,22 @@ def is_valid_username(username):
         return False
     if not username[0].isalpha():
         return False
-    for char in username:
-        if not (char.isalnum() or char == '_'):
-            return False
-    return True
+    return all(c.isalnum() or c == '_' for c in username)
 
 def generate_username(mode, length=5):
-    attempts = 0
-    while attempts < 200:
-        attempts += 1
+    for _ in range(200):
         if mode == "pattern":
-            username = ""
-            for i in range(length):
-                if i % 2 == 0:
-                    username += random.choice(consonants)
-                else:
-                    username += random.choice(vowels)
+            username = ''.join(random.choice(consonants) if i%2==0 else random.choice(vowels) for i in range(length))
         elif mode == "digits":
-            if length == 5:
-                letters_count = random.randint(2, 4)
-            elif length == 6:
-                letters_count = random.randint(2, 5)
-            else:
-                letters_count = random.randint(3, 5)
-            digits_count = length - letters_count
-            letters = ''.join(random.choice(all_letters) for _ in range(letters_count))
-            nums = ''.join(random.choice(digits) for _ in range(digits_count))
-            if random.choice([True, False]):
-                username = letters + nums
-            else:
-                username = nums + letters
-                if username[0].isdigit():
-                    continue
+            letters_cnt = random.randint(2, length-1) if length>2 else 1
+            digits_cnt = length - letters_cnt
+            letters = ''.join(random.choice(all_letters) for _ in range(letters_cnt))
+            nums = ''.join(random.choice(digits) for _ in range(digits_cnt))
+            username = (letters + nums) if random.choice([True, False]) else (nums + letters)
+            if username[0].isdigit():
+                continue
         elif mode == "combo":
-            username = ""
-            for i in range(length):
-                if i == 0:
-                    username += random.choice(all_letters)
-                else:
-                    if random.random() < 0.5:
-                        username += random.choice(digits)
-                    else:
-                        username += random.choice(all_letters)
+            username = ''.join(random.choice(all_letters) if i==0 else (random.choice(digits) if random.random()<0.5 else random.choice(all_letters)) for i in range(length))
         else:
             username = ''.join(random.choice(all_letters) for _ in range(length))
         if is_valid_username(username):
@@ -232,25 +185,24 @@ def check_username_telegram(username):
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         try:
-            response = scraper.get(f"https://t.me/{username}", headers=headers, timeout=10, allow_redirects=True)
+            r = scraper.get(f"https://t.me/{username}", headers=headers, timeout=10, allow_redirects=True)
         except:
-            response = requests.get(f"https://t.me/{username}", headers=headers, timeout=10, allow_redirects=True)
-        if response.status_code == 404:
+            r = requests.get(f"https://t.me/{username}", headers=headers, timeout=10, allow_redirects=True)
+        if r.status_code == 404:
             return True
-        if response.status_code in [301,302,303,307,308] and ('telegram.org' in response.url or response.url.endswith('/')):
+        if r.status_code in [301,302,303,307,308] and ('telegram.org' in r.url or r.url.endswith('/')):
             return True
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, 'html.parser')
             if soup.find('div', class_='tgme_page_title') or soup.find('div', class_='tgme_channel_info'):
                 return False
-            text_lower = soup.get_text().lower()
-            if any(phrase in text_lower for phrase in ['if you have telegram', 'doesn\'t exist', 'не существует', 'страница не найдена']):
+            text = soup.get_text().lower()
+            if any(p in text for p in ['if you have telegram', "doesn't exist", 'не существует', 'страница не найдена']):
                 return True
-            if any(phrase in text_lower for phrase in ['subscribers', 'members', 'online', 'created', 'создан', 'подписчиков']):
+            if any(p in text for p in ['subscribers', 'members', 'online', 'created', 'создан', 'подписчиков']):
                 return False
         return False
-    except Exception as e:
-        print(f"❌ Ошибка Telegram: {e}")
+    except:
         return False
 
 def check_username_fragment(username):
@@ -263,31 +215,30 @@ def check_username_fragment(username):
         try:
             driver.get(f"https://fragment.com/username/{username}")
             time.sleep(3)
-            page_source = driver.page_source.lower()
-            page_title = driver.title.lower()
-            if "auction" in page_title or "аукцион" in page_title:
+            src = driver.page_source.lower()
+            title = driver.title.lower()
+            if "auction" in title or "аукцион" in title:
                 return "auction"
-            if "for sale" in page_source or "продажа" in page_source:
+            if "for sale" in src or "продажа" in src:
                 return "available"
             try:
                 if driver.find_element(By.XPATH, "//*[contains(text(), 'Buy') or contains(text(), 'Купить')]"):
                     return "available"
             except:
                 pass
-            if "not found" in page_source or "не найдено" in page_source:
+            if "not found" in src or "не найдено" in src:
                 return "taken"
             return "unknown"
         finally:
             driver.quit()
-    except Exception as e:
-        print(f"❌ Ошибка Fragment: {e}")
+    except:
         return "error"
 
 def check_username_complete(username):
     if check_username_telegram(username):
         return True
-    fragment = check_username_fragment(username)
-    return fragment in ["available", "auction"]
+    frag = check_username_fragment(username)
+    return frag in ["available", "auction"]
 
 def check_username_parallel(username):
     return username, check_username_complete(username)
@@ -295,16 +246,13 @@ def check_username_parallel(username):
 def search_three_usernames(chat_id, mode, mode_name, user_info, length):
     user_id = user_info['id']
     search_active[user_id] = True
-    SEARCH_COST = 1
-    RESULTS_COUNT = 3
+    SEARCH_COST, RESULTS_COUNT = 1, 3
     msg = bot.send_message(chat_id, f"🔍 Ищу {RESULTS_COUNT} {mode_name} длиной {length}...")
     if not user_info['stats']['unlimited'] and user_info['stats']['searches_left'] < SEARCH_COST:
         bot.send_message(chat_id, f"❌ Недостаточно поисков. Нужно: {SEARCH_COST}")
         search_active[user_id] = False
         return
-    found = []
-    checked = 0
-    start = time.time()
+    found, checked, start = [], 0, time.time()
     while len(found) < RESULTS_COUNT and search_active.get(user_id):
         candidates = []
         for _ in range(30):
@@ -321,13 +269,10 @@ def search_three_usernames(chat_id, mode, mode_name, user_info, length):
             checked += 1
             checked_usernames.add(u)
             if avail:
-                print(f"✅ @{u} доступен")
                 found.append(u)
                 available_usernames.add(u)
                 if len(found) >= RESULTS_COUNT:
                     break
-            else:
-                print(f"❌ @{u} занят")
         if checked % 5 == 0:
             try:
                 speed = checked / (time.time() - start)
@@ -377,7 +322,7 @@ def handle_callback(call):
     user_id = user_info['id']
     try:
         if call.data == "stop_search":
-            if user_id in search_active and search_active[user_id]:
+            if search_active.get(user_id):
                 search_active[user_id] = False
                 bot.answer_callback_query(call.id, "⏹ Останавливаю...")
             else:
@@ -395,7 +340,7 @@ def handle_callback(call):
             if len(parts) >= 3:
                 mode, length = parts[1], int(parts[2])
                 mode_name = {"pattern":"Паттерн","digits":"С цифрами","combo":"Комбо"}.get(mode, mode)
-                if user_id in search_active and search_active[user_id]:
+                if search_active.get(user_id):
                     bot.answer_callback_query(call.id, "⏳ Поиск уже идет")
                     return
                 if not can_search(user_info):
@@ -421,11 +366,7 @@ def handle_callback(call):
                 types.InlineKeyboardButton("❌ ОТКАЗАТЬ", callback_data="admin_deny")
             )
             try:
-                bot.send_message(
-                    ADMIN_ID,
-                    f"💰 ЗАПРОС НА ПРОВЕРКУ ОПЛАТЫ\n\n👤 {user_info['username']}\n🆔 ID: {user_id}\n💰 Сумма: {amount}₽\n📦 Тариф: {tariff['name']}\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                    reply_markup=admin_markup
-                )
+                bot.send_message(ADMIN_ID, f"💰 ЗАПРОС НА ПРОВЕРКУ ОПЛАТЫ\n\n👤 {user_info['username']}\n🆔 ID: {user_id}\n💰 Сумма: {amount}₽\n📦 Тариф: {tariff['name']}\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", reply_markup=admin_markup)
                 bot.answer_callback_query(call.id, "✅ Запрос отправлен админу!")
                 bot.send_message(chat_id, f"✅ Запрос отправлен! Админ {SUPPORT_USERNAME} проверит оплату.")
             except Exception as e:
@@ -558,6 +499,9 @@ def handle_buttons(message):
     elif text == "📊 СТАТИСТИКА":
         premium = sum(1 for u in user_stats.values() if u.get('unlimited'))
         bot.send_message(chat_id, f"📊 СТАТИСТИКА\n✅ Найдено ников: {len(available_usernames)}\n👥 Пользователей: {len(user_stats)}\n💎 Премиум: {premium}")
+    else:
+        # Если пользователь отправил что-то неизвестное, показываем меню
+        show_main_menu(chat_id, user_info)
 
 @bot.message_handler(commands=['start'])
 def start(message):
