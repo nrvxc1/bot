@@ -33,7 +33,6 @@ PRICES = {
     "unlimited": 1000
 }
 
-# Соответствие сумм и тарифов (ключи — целые числа)
 TARIFFS = {
     30: {"name": "1 поиск", "key": "1", "searches": 1, "unlimited": False},
     90: {"name": "3 поиска", "key": "3", "searches": 3, "unlimited": False},
@@ -41,13 +40,11 @@ TARIFFS = {
     1000: {"name": "Безлимит", "key": "unlimited", "searches": 0, "unlimited": True}
 }
 
-# Символы для генерации
 consonants = 'bcdfghjklmnpqrstvwxz'
 vowels = 'aeiouy'
 all_letters = string.ascii_lowercase
 digits = '0123456789'
 
-# ========== БАЗА ДАННЫХ (ПАПКА data) ==========
 checked_usernames = set()
 available_usernames = set()
 user_stats = {}
@@ -56,7 +53,7 @@ search_active = {}
 scraper = cloudscraper.create_scraper()
 executor = ThreadPoolExecutor(max_workers=15)
 
-# Создаём папку для данных, если её нет
+# Создаём папку для данных
 if not os.path.exists('data'):
     os.makedirs('data')
 
@@ -102,7 +99,6 @@ def save_data():
     with open('data/users.json', 'w') as f:
         json.dump(user_stats, f, indent=2, ensure_ascii=False)
 
-# ========== ФУНКЦИИ ПОЛЬЗОВАТЕЛЕЙ ==========
 def get_user_info(user):
     user_id = str(user.id)
     username = f"@{user.username}" if user.username else "без юзернейма"
@@ -119,9 +115,13 @@ def get_user_info(user):
             }
             save_data()
             print(f"👤 Новый пользователь: {user_id}")
+            # Отправляем приветствие новому пользователю
+            try:
+                bot.send_message(int(user_id), "🎉 Добро пожаловать! У тебя есть 1 бесплатный поиск (3 ника). Используй кнопки ниже.")
+            except:
+                pass
         except Exception as e:
             print(f"❌ Ошибка при создании пользователя {user_id}: {e}")
-            # временная запись без сохранения
             user_stats[user_id] = {
                 'first_seen': datetime.now().isoformat(),
                 'searches_left': 1,
@@ -143,7 +143,6 @@ def can_search(user_info):
     return stats['unlimited'] or stats['searches_left'] > 0
 
 def add_searches(user_id, amount):
-    """Добавляет поиски пользователю по сумме доната"""
     if amount in TARIFFS:
         tariff = TARIFFS[amount]
         if user_id not in user_stats:
@@ -157,10 +156,10 @@ def add_searches(user_id, amount):
         if tariff['unlimited']:
             user_stats[user_id]['unlimited'] = True
             user_stats[user_id]['searches_left'] = 0
-            msg = f"🎉 БЕЗЛИМИТ АКТИВИРОВАН! Теперь ты можешь искать сколько угодно ников."
+            msg = f"🎉 БЕЗЛИМИТ АКТИВИРОВАН!"
         else:
             user_stats[user_id]['searches_left'] += tariff['searches']
-            msg = f"✅ ОПЛАЧЕНО! Тебе начислено {tariff['searches']} поисков."
+            msg = f"✅ ОПЛАЧЕНО! Начислено {tariff['searches']} поисков."
         if 'purchases' not in user_stats[user_id]:
             user_stats[user_id]['purchases'] = []
         user_stats[user_id]['purchases'].append({
@@ -176,7 +175,6 @@ def add_searches(user_id, amount):
         return True
     return False
 
-# ========== ПРОВЕРКА КОРРЕКТНОСТИ ЮЗЕРНЕЙМА ==========
 def is_valid_username(username):
     if not username or len(username) < 5 or len(username) > 32:
         return False
@@ -187,7 +185,6 @@ def is_valid_username(username):
             return False
     return True
 
-# ========== ГЕНЕРАЦИЯ USERNAME ==========
 def generate_username(mode, length=5):
     attempts = 0
     while attempts < 200:
@@ -231,10 +228,9 @@ def generate_username(mode, length=5):
             return username
     return ''.join(random.choice(all_letters) for _ in range(length))
 
-# ========== ПРОВЕРКА В TELEGRAM ==========
 def check_username_telegram(username):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         try:
             response = scraper.get(f"https://t.me/{username}", headers=headers, timeout=10, allow_redirects=True)
         except:
@@ -254,10 +250,9 @@ def check_username_telegram(username):
                 return False
         return False
     except Exception as e:
-        print(f"❌ Ошибка при проверке Telegram @{username}: {e}")
+        print(f"❌ Ошибка Telegram: {e}")
         return False
 
-# ========== ПРОВЕРКА ЧЕРЕЗ FRAGMENT ==========
 def check_username_fragment(username):
     try:
         chrome_options = Options()
@@ -285,7 +280,7 @@ def check_username_fragment(username):
         finally:
             driver.quit()
     except Exception as e:
-        print(f"❌ Ошибка Fragment для @{username}: {e}")
+        print(f"❌ Ошибка Fragment: {e}")
         return "error"
 
 def check_username_complete(username):
@@ -297,7 +292,6 @@ def check_username_complete(username):
 def check_username_parallel(username):
     return username, check_username_complete(username)
 
-# ========== ПОИСК 3 НИКОВ ЗА 1 ЗАПРОС ==========
 def search_three_usernames(chat_id, mode, mode_name, user_info, length):
     user_id = user_info['id']
     search_active[user_id] = True
@@ -352,7 +346,6 @@ def search_three_usernames(chat_id, mode, mode_name, user_info, length):
     bot.edit_message_text(result, chat_id, msg.message_id, reply_markup=markup, parse_mode='Markdown')
     search_active[user_id] = False
 
-# ========== МЕНЮ ОПЛАТЫ ==========
 def show_payment_menu(chat_id, user_info):
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
@@ -377,7 +370,6 @@ def show_payment_instruction(chat_id, user_info, tariff_key):
     )
     bot.send_message(chat_id, f"💎 ОПЛАТА: {tariff_name}\n💰 Сумма: {amount}₽\n👤 Твой ID: {user_id}\n\n📝 ИНСТРУКЦИЯ:\n1️⃣ Нажми кнопку оплаты\n2️⃣ В @send создай чек на {amount}₽\n3️⃣ В комментарии укажи свой ID: {user_id}\n4️⃣ Оплати чек\n5️⃣ Нажми «✅ Я ОПЛАТИЛ»\n6️⃣ Админ проверит и начислит поиски\n\n❓ Проблемы: {SUPPORT_USERNAME}", reply_markup=markup)
 
-# ========== ОБРАБОТКА КОЛБЭКОВ ==========
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     chat_id = call.message.chat.id
@@ -438,7 +430,7 @@ def handle_callback(call):
                 bot.send_message(chat_id, f"✅ Запрос отправлен! Админ {SUPPORT_USERNAME} проверит оплату.")
             except Exception as e:
                 print(f"Ошибка при отправке админу: {e}")
-                bot.answer_callback_query(call.id, "❌ Не удалось отправить запрос админу. Попробуй позже.")
+                bot.answer_callback_query(call.id, "❌ Не удалось отправить запрос админу.")
         elif call.data.startswith("admin_give_"):
             if call.from_user.id != ADMIN_ID:
                 bot.answer_callback_query(call.id, "❌ Только для админа")
@@ -469,7 +461,6 @@ def handle_callback(call):
         except:
             pass
 
-# ========== АДМИН КОМАНДЫ ==========
 @bot.message_handler(commands=['give','add','user'])
 def admin_commands(message):
     if message.from_user.id != ADMIN_ID:
@@ -520,7 +511,6 @@ def admin_commands(message):
         except:
             bot.reply_to(message, "❌ /user 123456789")
 
-# ========== ГЛАВНОЕ МЕНЮ ==========
 def show_main_menu(chat_id, user_info):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add("🎯 ПАТТЕРН", "🔢 С ЦИФРАМИ", "⚡️ КОМБО", "⏹ СТОП")
@@ -528,7 +518,6 @@ def show_main_menu(chat_id, user_info):
     searches = "∞" if user_info['stats']['unlimited'] else str(user_info['stats']['searches_left'])
     bot.send_message(chat_id, f"🔍 ПОИСК НИКОВ\n\n💰 Поисков: {searches} (1 поиск = 3 ника)\n📊 Всего найдено: {len(available_usernames)}\n\n👇 Выбери режим:", reply_markup=markup)
 
-# ========== ОБРАБОТКА КНОПОК ==========
 @bot.message_handler(func=lambda m: True)
 def handle_buttons(message):
     chat_id = message.chat.id
@@ -570,11 +559,16 @@ def handle_buttons(message):
         premium = sum(1 for u in user_stats.values() if u.get('unlimited'))
         bot.send_message(chat_id, f"📊 СТАТИСТИКА\n✅ Найдено ников: {len(available_usernames)}\n👥 Пользователей: {len(user_stats)}\n💎 Премиум: {premium}")
 
-# ========== ЗАПУСК ==========
+@bot.message_handler(commands=['start'])
+def start(message):
+    chat_id = message.chat.id
+    user_info = get_user_info(message.from_user)
+    show_main_menu(chat_id, user_info)
+
 if __name__ == "__main__":
     load_data()
     print("\n" + "="*80)
-    print("🤖 БОТ ЗАПУЩЕН (оплата через @send)")
+    print("🤖 БОТ ЗАПУЩЕН (работает для всех пользователей)")
     print(f"👤 Админ: {ADMIN_ID}")
     print(f"📞 Поддержка: {SUPPORT_USERNAME}")
     print("="*80)
