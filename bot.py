@@ -24,6 +24,8 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 ADMIN_ID = 8746165041
 SUPPORT_USERNAME = "@supp0rt_tagforce"
+REQUIRED_CHANNEL = "@Tag_Force"  # username канала для проверки подписки
+REQUIRED_CHANNEL_LINK = "https://t.me/Tag_Force"
 
 # Ссылки на оплату через @send (чеки) - ТОЛЬКО ДЛЯ РУБЛЕЙ
 PAYMENT_LINKS_RUB = {
@@ -110,13 +112,14 @@ def get_user_info(user):
         try:
             user_stats[user_id] = {
                 'first_seen': datetime.now().isoformat(),
-                'searches_left': 1,
+                'searches_left': 0,
                 'total_searches': 0,
                 'found': 0,
                 'unlimited': False,
                 'username': username,
                 'purchases': [],
-                'last_hourly_add': 0
+                'last_hourly_add': 0,
+                'has_subscribed': False
             }
             save_data()
             print(f"👤 Новый пользователь: {user_id}")
@@ -124,13 +127,14 @@ def get_user_info(user):
             print(f"❌ Ошибка при создании пользователя {user_id}: {e}")
             user_stats[user_id] = {
                 'first_seen': datetime.now().isoformat(),
-                'searches_left': 1,
+                'searches_left': 0,
                 'total_searches': 0,
                 'found': 0,
                 'unlimited': False,
                 'username': username,
                 'purchases': [],
-                'last_hourly_add': 0
+                'last_hourly_add': 0,
+                'has_subscribed': False
             }
     return {
         'id': user_id,
@@ -147,7 +151,7 @@ def add_searches(user_id, amount):
         tariff = TARIFFS[amount]
         if user_id not in user_stats:
             user_stats[user_id] = {
-                'searches_left': 0, 'total_searches': 0, 'found': 0, 'unlimited': False, 'purchases': [], 'last_hourly_add': 0
+                'searches_left': 0, 'total_searches': 0, 'found': 0, 'unlimited': False, 'purchases': [], 'last_hourly_add': 0, 'has_subscribed': False
             }
         if tariff['unlimited']:
             user_stats[user_id]['unlimited'] = True
@@ -162,6 +166,28 @@ def add_searches(user_id, amount):
         save_data()
         try:
             bot.send_message(int(user_id), msg)
+        except:
+            pass
+        return True
+    return False
+
+def check_subscription(user_id):
+    """Проверяет, подписан ли пользователь на канал"""
+    try:
+        member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+        return member.status in ['member', 'administrator', 'creator']
+    except Exception as e:
+        print(f"Ошибка проверки подписки для {user_id}: {e}")
+        return False
+
+def add_bonus_for_subscription(user_id):
+    """Добавляет бонусные 2 поиска за подписку"""
+    if user_id in user_stats and not user_stats[user_id].get('has_subscribed', False):
+        user_stats[user_id]['searches_left'] += 2
+        user_stats[user_id]['has_subscribed'] = True
+        save_data()
+        try:
+            bot.send_message(int(user_id), "🎁 Благодарим за подписку! Вам начислено +2 поиска!")
         except:
             pass
         return True
@@ -344,8 +370,18 @@ def handle_callback(call):
     user_id = user_info['id']
     
     try:
+        # ===== ПРОВЕРКА ПОДПИСКИ =====
+        if call.data == "check_subscription":
+            if check_subscription(user_id):
+                bot.answer_callback_query(call.id, "✅ Подписка подтверждена! +2 поиска")
+                add_bonus_for_subscription(user_id)
+                bot.delete_message(chat_id, call.message.message_id)
+                show_main_menu(chat_id, user_info)
+            else:
+                bot.answer_callback_query(call.id, "❌ Вы не подписаны на канал! Подпишитесь и нажмите снова.")
+        
         # ===== ВЫБОР ВАЛЮТЫ =====
-        if call.data == "currency_rub":
+        elif call.data == "currency_rub":
             bot.answer_callback_query(call.id, "🇷🇺 Выбраны рубли")
             bot.delete_message(chat_id, call.message.message_id)
             markup = types.InlineKeyboardMarkup(row_width=1)
@@ -514,7 +550,6 @@ def handle_callback(call):
                 if not can_search(user_info):
                     bot.answer_callback_query(call.id, "❌ Нет поисков")
                     bot.delete_message(chat_id, call.message.message_id)
-                    # Показываем меню оплаты
                     markup = types.InlineKeyboardMarkup(row_width=2)
                     markup.add(
                         types.InlineKeyboardButton("🇷🇺 РУБЛИ", callback_data="currency_rub"),
@@ -629,6 +664,23 @@ def show_main_menu(chat_id, user_info):
     searches = "∞" if user_info['stats']['unlimited'] else str(user_info['stats']['searches_left'])
     bot.send_message(chat_id, f"🔍 ПОИСК НИКОВ\n\n💰 Поисков: {searches} (1 поиск = 3 ника)\n📊 Всего найдено: {len(available_usernames)}\n\n👇 Выбери режим:", reply_markup=markup)
 
+def show_subscription_required(chat_id, user_id):
+    """Показывает сообщение о необходимости подписки"""
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("📢 ПЕРЕЙТИ В КАНАЛ", url=REQUIRED_CHANNEL_LINK))
+    markup.add(types.InlineKeyboardButton("✅ Я ПОДПИСАЛСЯ", callback_data="check_subscription"))
+    
+    bot.send_message(
+        chat_id,
+        f"🔒 **ДОСТУП ОГРАНИЧЕН**\n\n"
+        f"Для использования бота необходимо подписаться на наш канал:\n"
+        f"👉 {REQUIRED_CHANNEL_LINK}\n\n"
+        f"✅ После подписки нажмите кнопку «Я ПОДПИСАЛСЯ»\n\n"
+        f"🎁 **Бонус:** +2 поиска за подписку!",
+        reply_markup=markup,
+        parse_mode='Markdown'
+    )
+
 @bot.message_handler(func=lambda m: True)
 def handle_buttons(message):
     chat_id = message.chat.id
@@ -715,7 +767,17 @@ def handle_buttons(message):
 def start(message):
     chat_id = message.chat.id
     user_info = get_user_info(message.from_user)
-    show_main_menu(chat_id, user_info)
+    user_id = user_info['id']
+    
+    # Проверяем подписку
+    if not user_info['stats'].get('has_subscribed', False):
+        if check_subscription(user_id):
+            add_bonus_for_subscription(user_id)
+            show_main_menu(chat_id, user_info)
+        else:
+            show_subscription_required(chat_id, user_id)
+    else:
+        show_main_menu(chat_id, user_info)
 
 if __name__ == "__main__":
     load_data()
@@ -723,6 +785,7 @@ if __name__ == "__main__":
     print("🤖 БОТ ЗАПУЩЕН (ОПЛАТА: РУБЛИ @send | ЗВЁЗДЫ ЧЕРЕЗ ПОДДЕРЖКУ)")
     print(f"👤 Админ: {ADMIN_ID}")
     print(f"📞 Поддержка: {SUPPORT_USERNAME}")
+    print(f"📢 Требуется подписка на канал: {REQUIRED_CHANNEL}")
     print("="*80)
     try:
         bot.infinity_polling(timeout=30, long_polling_timeout=20)
