@@ -25,7 +25,18 @@ bot = telebot.TeleBot(BOT_TOKEN)
 ADMIN_ID = 8746165041
 SUPPORT_USERNAME = "@supp0rt_tagforce"
 
-PRICES = {"1": 30, "3": 90, "10": 250, "unlimited": 1000}
+# Ссылки на оплату через @send (чеки) - ТОЛЬКО ДЛЯ РУБЛЕЙ
+PAYMENT_LINKS_RUB = {
+    30: "https://t.me/send?start=IVhfW5CHhVop",
+    90: "https://t.me/send?start=IVcYsuAhRqJd",
+    250: "https://t.me/send?start=IVrryVa7kMfH",
+    1000: "https://t.me/send?start=IVGggB6GOrZy"
+}
+
+# Цены в рублях и звёздах
+PRICES_RUB = {"1": 30, "3": 90, "10": 250, "unlimited": 1000}
+PRICES_STARS = {"1": 20, "3": 60, "10": 170, "unlimited": 670}
+
 TARIFFS = {
     30: {"name": "1 поиск", "key": "1", "searches": 1, "unlimited": False},
     90: {"name": "3 поиска", "key": "3", "searches": 3, "unlimited": False},
@@ -104,7 +115,8 @@ def get_user_info(user):
                 'found': 0,
                 'unlimited': False,
                 'username': username,
-                'purchases': []
+                'purchases': [],
+                'last_hourly_add': 0
             }
             save_data()
             print(f"👤 Новый пользователь: {user_id}")
@@ -117,7 +129,8 @@ def get_user_info(user):
                 'found': 0,
                 'unlimited': False,
                 'username': username,
-                'purchases': []
+                'purchases': [],
+                'last_hourly_add': 0
             }
     return {
         'id': user_id,
@@ -134,7 +147,7 @@ def add_searches(user_id, amount):
         tariff = TARIFFS[amount]
         if user_id not in user_stats:
             user_stats[user_id] = {
-                'searches_left': 0, 'total_searches': 0, 'found': 0, 'unlimited': False, 'purchases': []
+                'searches_left': 0, 'total_searches': 0, 'found': 0, 'unlimited': False, 'purchases': [], 'last_hourly_add': 0
             }
         if tariff['unlimited']:
             user_stats[user_id]['unlimited'] = True
@@ -153,6 +166,38 @@ def add_searches(user_id, amount):
             pass
         return True
     return False
+
+def hourly_free_searches():
+    while True:
+        time.sleep(3600)
+        now = time.time()
+        print(f"🕐 Ежечасное начисление: {datetime.now()}")
+        updated = 0
+        for user_id, data in user_stats.items():
+            if data.get('unlimited'):
+                continue
+            last = data.get('last_hourly_add', 0)
+            if now - last < 3600:
+                continue
+            current = data.get('searches_left', 0)
+            new_total = min(current + 2, 10)
+            if new_total != current:
+                data['searches_left'] = new_total
+                data['last_hourly_add'] = now
+                updated += 1
+                try:
+                    bot.send_message(int(user_id), f"🎁 Ежечасный бонус! +2 поиска. Теперь у тебя {new_total} поисков (макс. 10).")
+                except:
+                    pass
+        if updated:
+            save_data()
+            print(f"✅ Начислено {updated} пользователям")
+        else:
+            print("❌ Никому не начислено")
+
+hourly_thread = threading.Thread(target=hourly_free_searches, daemon=True)
+hourly_thread.start()
+print("✅ Ежечасное начисление поисков запущено")
 
 def is_valid_username(username):
     if not username or len(username) < 5 or len(username) > 32:
@@ -291,50 +336,173 @@ def search_three_usernames(chat_id, mode, mode_name, user_info, length):
     bot.edit_message_text(result, chat_id, msg.message_id, reply_markup=markup, parse_mode='Markdown')
     search_active[user_id] = False
 
-def show_payment_menu(chat_id, user_info):
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        types.InlineKeyboardButton(f"🔹 1 ПОИСК — {PRICES['1']}₽", callback_data="pay_1"),
-        types.InlineKeyboardButton(f"🔸 3 ПОИСКА — {PRICES['3']}₽", callback_data="pay_3"),
-        types.InlineKeyboardButton(f"🔹 10 ПОИСКОВ — {PRICES['10']}₽", callback_data="pay_10"),
-        types.InlineKeyboardButton(f"💎 БЕЗЛИМИТ — {PRICES['unlimited']}₽", callback_data="pay_unlimited"),
-        types.InlineKeyboardButton("◀️ НАЗАД В МЕНЮ", callback_data="back_to_main")
-    )
-    bot.send_message(chat_id, f"💳 ВЫБЕРИ ТАРИФ\n\n👤 Твой ID: {user_info['id']}\n💰 Тарифы:\n▫️ 1 поиск (3 ника) — {PRICES['1']}₽\n▫️ 3 поиска (9 ников) — {PRICES['3']}₽\n▫️ 10 поисков (30 ников) — {PRICES['10']}₽\n▫️ Безлимит — {PRICES['unlimited']}₽", reply_markup=markup)
-
-def show_payment_instruction(chat_id, user_info, tariff_key):
-    amount = PRICES[tariff_key]
-    tariff_name = {"1":"1 поиск (3 ника)","3":"3 поиска (9 ников)","10":"10 поисков (30 ников)","unlimited":"Безлимит"}[tariff_key]
-    user_id = user_info['id']
-    send_url = f"https://t.me/send?start=pay_{amount}_{user_id}"
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        types.InlineKeyboardButton(f"💳 ОПЛАТИТЬ {amount}₽ ЧЕРЕЗ @send", url=send_url),
-        types.InlineKeyboardButton("✅ Я ОПЛАТИЛ", callback_data=f"confirm_payment_{tariff_key}"),
-        types.InlineKeyboardButton("◀️ НАЗАД К ТАРИФАМ", callback_data="back_to_tariffs")
-    )
-    bot.send_message(chat_id, f"💎 ОПЛАТА: {tariff_name}\n💰 Сумма: {amount}₽\n👤 Твой ID: {user_id}\n\n📝 ИНСТРУКЦИЯ:\n1️⃣ Нажми кнопку оплаты\n2️⃣ В @send создай чек на {amount}₽\n3️⃣ В комментарии укажи свой ID: {user_id}\n4️⃣ Оплати чек\n5️⃣ Нажми «✅ Я ОПЛАТИЛ»\n6️⃣ Админ проверит и начислит поиски\n\n❓ Проблемы: {SUPPORT_USERNAME}", reply_markup=markup)
-
+# ========== ОБРАБОТКА КОЛБЭКОВ ==========
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     chat_id = call.message.chat.id
     user_info = get_user_info(call.from_user)
     user_id = user_info['id']
+    
     try:
-        if call.data == "stop_search":
-            if search_active.get(user_id):
-                search_active[user_id] = False
-                bot.answer_callback_query(call.id, "⏹ Останавливаю...")
-            else:
-                bot.answer_callback_query(call.id, "❌ Поиск не активен")
-        elif call.data == "back_to_main":
+        # ===== ВЫБОР ВАЛЮТЫ =====
+        if call.data == "currency_rub":
+            bot.answer_callback_query(call.id, "🇷🇺 Выбраны рубли")
+            bot.delete_message(chat_id, call.message.message_id)
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                types.InlineKeyboardButton(f"🔹 1 ПОИСК — {PRICES_RUB['1']}₽", callback_data="pay_rub_1"),
+                types.InlineKeyboardButton(f"🔸 3 ПОИСКА — {PRICES_RUB['3']}₽", callback_data="pay_rub_3"),
+                types.InlineKeyboardButton(f"🔹 10 ПОИСКОВ — {PRICES_RUB['10']}₽", callback_data="pay_rub_10"),
+                types.InlineKeyboardButton(f"💎 БЕЗЛИМИТ — {PRICES_RUB['unlimited']}₽", callback_data="pay_rub_unlimited"),
+                types.InlineKeyboardButton("◀️ НАЗАД", callback_data="back_to_payment")
+            )
+            bot.send_message(
+                chat_id,
+                f"💳 **ВЫБЕРИ ТАРИФ (РУБЛИ)**\n\n"
+                f"👤 Твой ID: `{user_id}`\n\n"
+                f"▫️ 1 поиск (3 ника) — {PRICES_RUB['1']}₽\n"
+                f"▫️ 3 поиска (9 ников) — {PRICES_RUB['3']}₽\n"
+                f"▫️ 10 поисков (30 ников) — {PRICES_RUB['10']}₽\n"
+                f"▫️ Безлимит — {PRICES_RUB['unlimited']}₽",
+                reply_markup=markup,
+                parse_mode='Markdown'
+            )
+        
+        elif call.data == "currency_stars":
+            bot.answer_callback_query(call.id, "⭐️ Выбраны звёзды")
+            bot.delete_message(chat_id, call.message.message_id)
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                types.InlineKeyboardButton(f"🔹 1 ПОИСК — {PRICES_STARS['1']}⭐️", callback_data="pay_stars_1"),
+                types.InlineKeyboardButton(f"🔸 3 ПОИСКА — {PRICES_STARS['3']}⭐️", callback_data="pay_stars_3"),
+                types.InlineKeyboardButton(f"🔹 10 ПОИСКОВ — {PRICES_STARS['10']}⭐️", callback_data="pay_stars_10"),
+                types.InlineKeyboardButton(f"💎 БЕЗЛИМИТ — {PRICES_STARS['unlimited']}⭐️", callback_data="pay_stars_unlimited"),
+                types.InlineKeyboardButton("◀️ НАЗАД", callback_data="back_to_payment")
+            )
+            bot.send_message(
+                chat_id,
+                f"⭐️ **ВЫБЕРИ ТАРИФ (ЗВЁЗДЫ)**\n\n"
+                f"👤 Твой ID: `{user_id}`\n\n"
+                f"▫️ 1 поиск (3 ника) — {PRICES_STARS['1']}⭐️\n"
+                f"▫️ 3 поиска (9 ников) — {PRICES_STARS['3']}⭐️\n"
+                f"▫️ 10 поисков (30 ников) — {PRICES_STARS['10']}⭐️\n"
+                f"▫️ Безлимит — {PRICES_STARS['unlimited']}⭐️",
+                reply_markup=markup,
+                parse_mode='Markdown'
+            )
+        
+        elif call.data == "back_to_payment":
             bot.answer_callback_query(call.id)
             bot.delete_message(chat_id, call.message.message_id)
-            show_main_menu(chat_id, user_info)
-        elif call.data == "back_to_tariffs":
-            bot.answer_callback_query(call.id)
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                types.InlineKeyboardButton("🇷🇺 РУБЛИ (через @send)", callback_data="currency_rub"),
+                types.InlineKeyboardButton("⭐️ ЗВЁЗДЫ (поддержка)", callback_data="currency_stars")
+            )
+            bot.send_message(
+                chat_id,
+                f"💳 **ВЫБЕРИ СПОСОБ ОПЛАТЫ**\n\n"
+                f"👤 Твой ID: `{user_id}`\n\n"
+                f"🇷🇺 **Рубли** — оплата через @send (чеки)\n"
+                f"⭐️ **Звёзды** — оплата внутренней валютой Telegram\n\n"
+                f"При оплате звёздами напиши в поддержку {SUPPORT_USERNAME}",
+                reply_markup=markup,
+                parse_mode='Markdown'
+            )
+        
+        # ===== ОПЛАТА В РУБЛЯХ =====
+        elif call.data.startswith("pay_rub_"):
+            tariff_key = call.data.replace("pay_rub_", "")
+            amount = PRICES_RUB[tariff_key]
+            tariff_name = {"1":"1 поиск (3 ника)","3":"3 поиска (9 ников)","10":"10 поисков (30 ников)","unlimited":"Безлимит"}[tariff_key]
+            pay_link = PAYMENT_LINKS_RUB.get(amount, "https://t.me/send")
+            
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                types.InlineKeyboardButton(f"💳 ОПЛАТИТЬ {amount}₽ ЧЕРЕЗ @send", url=pay_link),
+                types.InlineKeyboardButton("✅ Я ОПЛАТИЛ", callback_data=f"confirm_payment_rub_{tariff_key}"),
+                types.InlineKeyboardButton("◀️ НАЗАД К ТАРИФАМ", callback_data="back_to_payment")
+            )
+            
+            bot.answer_callback_query(call.id, f"✅ Выбран тариф {tariff_name}")
             bot.delete_message(chat_id, call.message.message_id)
-            show_payment_menu(chat_id, user_info)
+            bot.send_message(
+                chat_id,
+                f"💎 **ОПЛАТА В РУБЛЯХ: {tariff_name}**\n\n"
+                f"💰 Сумма: {amount}₽\n"
+                f"👤 Твой ID: `{user_id}`\n\n"
+                f"📝 **ИНСТРУКЦИЯ:**\n\n"
+                f"1️⃣ Нажми кнопку оплаты\n"
+                f"2️⃣ В открывшемся чате с @send создай чек на {amount}₽\n"
+                f"3️⃣ В комментарии к чеку **ОБЯЗАТЕЛЬНО** укажи свой ID: `{user_id}`\n"
+                f"4️⃣ Оплати чек любым способом\n"
+                f"5️⃣ После оплаты нажми «✅ Я ОПЛАТИЛ»\n"
+                f"6️⃣ Админ проверит оплату и начислит поиски\n\n"
+                f"❓ Проблемы: {SUPPORT_USERNAME}",
+                reply_markup=markup,
+                parse_mode='Markdown'
+            )
+        
+        # ===== ОПЛАТА ЗВЁЗДАМИ =====
+        elif call.data.startswith("pay_stars_"):
+            tariff_key = call.data.replace("pay_stars_", "")
+            stars_amount = PRICES_STARS[tariff_key]
+            tariff_name = {"1":"1 поиск (3 ника)","3":"3 поиска (9 ников)","10":"10 поисков (30 ников)","unlimited":"Безлимит"}[tariff_key]
+            
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                types.InlineKeyboardButton("📩 НАПИСАТЬ ПОДДЕРЖКЕ", url=f"https://t.me/{SUPPORT_USERNAME.replace('@', '')}"),
+                types.InlineKeyboardButton("◀️ НАЗАД К ТАРИФАМ", callback_data="back_to_payment")
+            )
+            
+            bot.answer_callback_query(call.id, f"⭐️ Выбран тариф {tariff_name}")
+            bot.delete_message(chat_id, call.message.message_id)
+            bot.send_message(
+                chat_id,
+                f"⭐️ **ОПЛАТА ЗВЁЗДАМИ: {tariff_name}**\n\n"
+                f"💰 Цена: {stars_amount} ⭐️\n"
+                f"👤 Твой ID: `{user_id}`\n\n"
+                f"📝 **ИНСТРУКЦИЯ:**\n\n"
+                f"1️⃣ Напиши в поддержку {SUPPORT_USERNAME}\n"
+                f"2️⃣ Укажи свой ID: `{user_id}`\n"
+                f"3️⃣ Укажи желаемый тариф: {tariff_name}\n"
+                f"4️⃣ Админ пришлёт ссылку на оплату звёздами\n"
+                f"5️⃣ После оплаты поиски начислятся автоматически\n\n"
+                f"❓ Вопросы: {SUPPORT_USERNAME}",
+                reply_markup=markup,
+                parse_mode='Markdown'
+            )
+        
+        # ===== ПОДТВЕРЖДЕНИЕ ОПЛАТЫ РУБЛЯМИ =====
+        elif call.data.startswith("confirm_payment_rub_"):
+            tariff_key = call.data.replace("confirm_payment_rub_", "")
+            amount = int(PRICES_RUB[tariff_key])
+            tariff = TARIFFS[amount]
+            
+            admin_markup = types.InlineKeyboardMarkup(row_width=2)
+            admin_markup.add(
+                types.InlineKeyboardButton(f"✅ ВЫДАТЬ {tariff['searches'] if tariff['searches']>0 else 'БЕЗЛИМИТ'}", callback_data=f"admin_give_{user_id}_{amount}"),
+                types.InlineKeyboardButton("❌ ОТКАЗАТЬ", callback_data="admin_deny")
+            )
+            
+            try:
+                bot.send_message(
+                    ADMIN_ID,
+                    f"💰 ЗАПРОС НА ПРОВЕРКУ ОПЛАТЫ (Рубли)\n\n"
+                    f"👤 {user_info['username']}\n"
+                    f"🆔 ID: {user_id}\n"
+                    f"💰 Сумма: {amount}₽\n"
+                    f"📦 Тариф: {tariff['name']}\n"
+                    f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    reply_markup=admin_markup
+                )
+                bot.answer_callback_query(call.id, "✅ Запрос отправлен админу!")
+                bot.send_message(chat_id, f"✅ Запрос отправлен! Админ {SUPPORT_USERNAME} проверит оплату.")
+            except Exception as e:
+                print(f"Ошибка при отправке админу: {e}")
+                bot.answer_callback_query(call.id, "❌ Не удалось отправить запрос админу.")
+        
+        # ===== ПОИСК НИКОВ =====
         elif call.data.startswith("search_"):
             parts = call.data.split("_")
             if len(parts) >= 3:
@@ -346,32 +514,19 @@ def handle_callback(call):
                 if not can_search(user_info):
                     bot.answer_callback_query(call.id, "❌ Нет поисков")
                     bot.delete_message(chat_id, call.message.message_id)
-                    show_payment_menu(chat_id, user_info)
+                    # Показываем меню оплаты
+                    markup = types.InlineKeyboardMarkup(row_width=2)
+                    markup.add(
+                        types.InlineKeyboardButton("🇷🇺 РУБЛИ", callback_data="currency_rub"),
+                        types.InlineKeyboardButton("⭐️ ЗВЁЗДЫ", callback_data="currency_stars")
+                    )
+                    bot.send_message(chat_id, "❌ У тебя закончились поиски! Пополни баланс:", reply_markup=markup)
                     return
                 bot.answer_callback_query(call.id, f"🔄 Ищу 3 {mode_name}...")
                 bot.delete_message(chat_id, call.message.message_id)
                 threading.Thread(target=search_three_usernames, args=(chat_id, mode, mode_name, user_info, length), daemon=True).start()
-        elif call.data.startswith("pay_"):
-            tariff_key = call.data.replace("pay_", "")
-            bot.answer_callback_query(call.id, "✅ Выбран тариф")
-            bot.delete_message(chat_id, call.message.message_id)
-            show_payment_instruction(chat_id, user_info, tariff_key)
-        elif call.data.startswith("confirm_payment_"):
-            tariff_key = call.data.replace("confirm_payment_", "")
-            amount = int(PRICES[tariff_key])
-            tariff = TARIFFS[amount]
-            admin_markup = types.InlineKeyboardMarkup(row_width=2)
-            admin_markup.add(
-                types.InlineKeyboardButton(f"✅ ВЫДАТЬ {tariff['searches'] if tariff['searches']>0 else 'БЕЗЛИМИТ'}", callback_data=f"admin_give_{user_id}_{amount}"),
-                types.InlineKeyboardButton("❌ ОТКАЗАТЬ", callback_data="admin_deny")
-            )
-            try:
-                bot.send_message(ADMIN_ID, f"💰 ЗАПРОС НА ПРОВЕРКУ ОПЛАТЫ\n\n👤 {user_info['username']}\n🆔 ID: {user_id}\n💰 Сумма: {amount}₽\n📦 Тариф: {tariff['name']}\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", reply_markup=admin_markup)
-                bot.answer_callback_query(call.id, "✅ Запрос отправлен админу!")
-                bot.send_message(chat_id, f"✅ Запрос отправлен! Админ {SUPPORT_USERNAME} проверит оплату.")
-            except Exception as e:
-                print(f"Ошибка при отправке админу: {e}")
-                bot.answer_callback_query(call.id, "❌ Не удалось отправить запрос админу.")
+        
+        # ===== АДМИН КОМАНДЫ =====
         elif call.data.startswith("admin_give_"):
             if call.from_user.id != ADMIN_ID:
                 bot.answer_callback_query(call.id, "❌ Только для админа")
@@ -387,14 +542,29 @@ def handle_callback(call):
                     bot.send_message(ADMIN_ID, f"✅ Пользователю {target_user_id} начислено {searches_text} поисков.")
                 else:
                     bot.answer_callback_query(call.id, "❌ Ошибка начисления")
+        
         elif call.data == "admin_deny":
             if call.from_user.id != ADMIN_ID:
                 bot.answer_callback_query(call.id, "❌ Только для админа")
                 return
             bot.answer_callback_query(call.id, "❌ Отказано")
             bot.edit_message_reply_markup(ADMIN_ID, call.message.message_id, reply_markup=None)
+        
+        elif call.data == "stop_search":
+            if search_active.get(user_id):
+                search_active[user_id] = False
+                bot.answer_callback_query(call.id, "⏹ Останавливаю...")
+            else:
+                bot.answer_callback_query(call.id, "❌ Поиск не активен")
+        
+        elif call.data == "back_to_main":
+            bot.answer_callback_query(call.id)
+            bot.delete_message(chat_id, call.message.message_id)
+            show_main_menu(chat_id, user_info)
+        
         else:
             bot.answer_callback_query(call.id, "❌ Неизвестная команда")
+            
     except Exception as e:
         print(f"Ошибка в callback: {e}")
         try:
@@ -465,23 +635,44 @@ def handle_buttons(message):
     user_info = get_user_info(message.from_user)
     user_id = user_info['id']
     text = message.text
+    
+    print(f"📩 Нажата кнопка: {text} от {user_id}")
+    
     if text == "⏹ СТОП":
         if search_active.get(user_id):
             search_active[user_id] = False
             bot.send_message(chat_id, "⏹ Останавливаю...")
         else:
             bot.send_message(chat_id, "❌ Нет активного поиска")
+    
     elif text == "📞 ПОДДЕРЖКА":
-        bot.send_message(chat_id, f"📞 ПОДДЕРЖКА\n👤 Твой ID: {user_id}\n💬 {SUPPORT_USERNAME}")
+        bot.send_message(chat_id, f"📞 ПОДДЕРЖКА\n👤 Твой ID: `{user_id}`\n💬 {SUPPORT_USERNAME}", parse_mode='Markdown')
+    
     elif text == "💎 КУПИТЬ":
         if search_active.get(user_id):
-            bot.send_message(chat_id, "⚠️ Сначала останови поиск (⏹ СТОП)")
-        else:
-            show_payment_menu(chat_id, user_info)
+            bot.send_message(chat_id, "⚠️ Сначала останови поиск кнопкой ⏹ СТОП")
+            return
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("🇷🇺 РУБЛИ (через @send)", callback_data="currency_rub"),
+            types.InlineKeyboardButton("⭐️ ЗВЁЗДЫ (поддержка)", callback_data="currency_stars")
+        )
+        bot.send_message(
+            chat_id,
+            f"💳 **ВЫБЕРИ СПОСОБ ОПЛАТЫ**\n\n"
+            f"👤 Твой ID: `{user_id}`\n\n"
+            f"🇷🇺 **Рубли** — оплата через @send (чеки)\n"
+            f"⭐️ **Звёзды** — оплата внутренней валютой Telegram\n\n"
+            f"После выбора тарифа следуй инструкции.",
+            reply_markup=markup,
+            parse_mode='Markdown'
+        )
+    
     elif text in ["🎯 ПАТТЕРН", "🔢 С ЦИФРАМИ", "⚡️ КОМБО"]:
         if search_active.get(user_id):
-            bot.send_message(chat_id, "⚠️ Сначала останови поиск (⏹ СТОП)")
+            bot.send_message(chat_id, "⚠️ Сначала останови поиск кнопкой ⏹ СТОП")
             return
+        
         mode = {"🎯 ПАТТЕРН":"pattern","🔢 С ЦИФРАМИ":"digits","⚡️ КОМБО":"combo"}[text]
         markup = types.InlineKeyboardMarkup(row_width=3)
         markup.add(
@@ -491,16 +682,33 @@ def handle_buttons(message):
             types.InlineKeyboardButton("◀️ НАЗАД", callback_data="back_to_main")
         )
         bot.send_message(chat_id, f"Выбери длину (будет найдено 3 ника):", reply_markup=markup)
+    
     elif text == "👤 ПРОФИЛЬ":
         s = user_info['stats']
         status = "💎 PREMIUM" if s['unlimited'] else "👤 FREE"
         searches = "∞" if s['unlimited'] else str(s['searches_left'])
-        bot.send_message(chat_id, f"👤 ПРОФИЛЬ\n🆔 ID: {user_id}\n📊 Статус: {status}\n💰 Осталось: {searches}\n✅ Найдено: {s['found']}\n🔄 Всего поисков: {s['total_searches']}")
+        bot.send_message(
+            chat_id,
+            f"👤 **ПРОФИЛЬ**\n\n"
+            f"🆔 ID: `{user_id}`\n"
+            f"📊 Статус: {status}\n"
+            f"💰 Осталось: {searches} (1 поиск = 3 ника)\n"
+            f"✅ Найдено: {s['found']}\n"
+            f"🔄 Всего поисков: {s['total_searches']}",
+            parse_mode='Markdown'
+        )
+    
     elif text == "📊 СТАТИСТИКА":
         premium = sum(1 for u in user_stats.values() if u.get('unlimited'))
-        bot.send_message(chat_id, f"📊 СТАТИСТИКА\n✅ Найдено ников: {len(available_usernames)}\n👥 Пользователей: {len(user_stats)}\n💎 Премиум: {premium}")
+        bot.send_message(
+            chat_id,
+            f"📊 **ГЛОБАЛЬНАЯ СТАТИСТИКА**\n\n"
+            f"✅ Найдено ников: {len(available_usernames)}\n"
+            f"👥 Пользователей: {len(user_stats)}\n"
+            f"💎 Премиум: {premium}"
+        )
+    
     else:
-        # Если пользователь отправил что-то неизвестное, показываем меню
         show_main_menu(chat_id, user_info)
 
 @bot.message_handler(commands=['start'])
@@ -512,7 +720,7 @@ def start(message):
 if __name__ == "__main__":
     load_data()
     print("\n" + "="*80)
-    print("🤖 БОТ ЗАПУЩЕН (работает для всех пользователей)")
+    print("🤖 БОТ ЗАПУЩЕН (ОПЛАТА: РУБЛИ @send | ЗВЁЗДЫ ЧЕРЕЗ ПОДДЕРЖКУ)")
     print(f"👤 Админ: {ADMIN_ID}")
     print(f"📞 Поддержка: {SUPPORT_USERNAME}")
     print("="*80)
