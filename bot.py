@@ -5,18 +5,11 @@ import threading
 import string
 import requests
 import re
-import cloudscraper
 import os
 import json
 from bs4 import BeautifulSoup
 from telebot import types
-from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
+from datetime import datetime, timedelta
 
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = "8442771928:AAEsiakjmFbJFDrCTGofcK4G-JysbSg84Hw"
@@ -24,27 +17,23 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 ADMIN_ID = 8746165041
 SUPPORT_USERNAME = "@supp0rt_tagforce"
-REQUIRED_CHANNEL = "@Tag_Force"  # username канала для проверки подписки
+REQUIRED_CHANNEL = "@Tag_Force"
 REQUIRED_CHANNEL_LINK = "https://t.me/Tag_Force"
 
-# Ссылки на оплату через @send (чеки) - ТОЛЬКО ДЛЯ РУБЛЕЙ
-PAYMENT_LINKS_RUB = {
-    30: "https://t.me/send?start=IVhfW5CHhVop",
-    90: "https://t.me/send?start=IVcYsuAhRqJd",
-    250: "https://t.me/send?start=IVrryVa7kMfH",
-    1000: "https://t.me/send?start=IVGggB6GOrZy"
+PREMIUM_PRICES = {
+    "1d": {"price_rub": 20, "price_stars": 15, "days": 1},
+    "3d": {"price_rub": 60, "price_stars": 45, "days": 3},
+    "7d": {"price_rub": 140, "price_stars": 100, "days": 7},
+    "1m": {"price_rub": 600, "price_stars": 450, "days": 30},
+    "3m": {"price_rub": 1800, "price_stars": 1350, "days": 90},
+    "1y": {"price_rub": 6000, "price_stars": 4500, "days": 365},
+    "forever": {"price_rub": 8000, "price_stars": 6000, "days": -1}
 }
 
-# Цены в рублях и звёздах
-PRICES_RUB = {"1": 30, "3": 90, "10": 250, "unlimited": 1000}
-PRICES_STARS = {"1": 20, "3": 60, "10": 170, "unlimited": 670}
+SEARCH_PRICE_RUB = 6
+SEARCH_PRICE_STARS = 5
 
-TARIFFS = {
-    30: {"name": "1 поиск", "key": "1", "searches": 1, "unlimited": False},
-    90: {"name": "3 поиска", "key": "3", "searches": 3, "unlimited": False},
-    250: {"name": "10 поисков", "key": "10", "searches": 10, "unlimited": False},
-    1000: {"name": "Безлимит", "key": "unlimited", "searches": 0, "unlimited": True}
-}
+user_states = {}
 
 consonants = 'bcdfghjklmnpqrstvwxz'
 vowels = 'aeiouy'
@@ -56,10 +45,6 @@ available_usernames = set()
 user_stats = {}
 search_active = {}
 
-scraper = cloudscraper.create_scraper()
-executor = ThreadPoolExecutor(max_workers=15)
-
-# Создаём папку для данных
 if not os.path.exists('data'):
     os.makedirs('data')
 
@@ -102,8 +87,29 @@ def save_data():
     with open('data/found.txt', 'w') as f:
         for username in available_usernames:
             f.write(f"@{username}\n")
+    
+    # Преобразуем datetime в строку для JSON
+    data_to_save = {}
+    for uid, data in user_stats.items():
+        data_copy = data.copy()
+        if 'premium_until' in data_copy and isinstance(data_copy['premium_until'], datetime):
+            data_copy['premium_until'] = data_copy['premium_until'].isoformat()
+        data_to_save[uid] = data_copy
+    
     with open('data/users.json', 'w') as f:
-        json.dump(user_stats, f, indent=2, ensure_ascii=False)
+        json.dump(data_to_save, f, indent=2, ensure_ascii=False)
+
+def is_premium(user_id):
+    if user_id not in user_stats:
+        return False
+    if user_stats[user_id].get('premium_forever', False):
+        return True
+    premium_until = user_stats[user_id].get('premium_until')
+    if premium_until:
+        if isinstance(premium_until, str):
+            premium_until = datetime.fromisoformat(premium_until)
+        return datetime.now() < premium_until
+    return False
 
 def get_user_info(user):
     user_id = str(user.id)
@@ -112,29 +118,29 @@ def get_user_info(user):
         try:
             user_stats[user_id] = {
                 'first_seen': datetime.now().isoformat(),
-                'searches_left': 0,
+                'searches_left': 1,
                 'total_searches': 0,
                 'found': 0,
-                'unlimited': False,
                 'username': username,
                 'purchases': [],
                 'last_hourly_add': 0,
-                'has_subscribed': False
+                'has_subscribed': False,
+                'premium_forever': False
             }
             save_data()
             print(f"👤 Новый пользователь: {user_id}")
         except Exception as e:
-            print(f"❌ Ошибка при создании пользователя {user_id}: {e}")
+            print(f"❌ Ошибка: {e}")
             user_stats[user_id] = {
                 'first_seen': datetime.now().isoformat(),
-                'searches_left': 0,
+                'searches_left': 1,
                 'total_searches': 0,
                 'found': 0,
-                'unlimited': False,
                 'username': username,
                 'purchases': [],
                 'last_hourly_add': 0,
-                'has_subscribed': False
+                'has_subscribed': False,
+                'premium_forever': False
             }
     return {
         'id': user_id,
@@ -144,50 +150,70 @@ def get_user_info(user):
     }
 
 def can_search(user_info):
-    return user_info['stats']['unlimited'] or user_info['stats']['searches_left'] > 0
+    return is_premium(user_info['id']) or user_info['stats']['searches_left'] > 0
 
 def add_searches(user_id, amount):
-    if amount in TARIFFS:
-        tariff = TARIFFS[amount]
-        if user_id not in user_stats:
-            user_stats[user_id] = {
-                'searches_left': 0, 'total_searches': 0, 'found': 0, 'unlimited': False, 'purchases': [], 'last_hourly_add': 0, 'has_subscribed': False
-            }
-        if tariff['unlimited']:
-            user_stats[user_id]['unlimited'] = True
-            user_stats[user_id]['searches_left'] = 0
-            msg = "🎉 БЕЗЛИМИТ АКТИВИРОВАН!"
+    if user_id not in user_stats:
+        user_stats[user_id] = {
+            'searches_left': 0, 'total_searches': 0, 'found': 0, 'purchases': [], 
+            'last_hourly_add': 0, 'has_subscribed': False, 'premium_forever': False
+        }
+    user_stats[user_id]['searches_left'] += amount
+    user_stats[user_id].setdefault('purchases', []).append({
+        'date': datetime.now().isoformat(), 'type': 'searches', 'amount': amount
+    })
+    save_data()
+    try:
+        bot.send_message(int(user_id), f"✅ Начислено {amount} поисков!")
+    except:
+        pass
+    return True
+
+def add_premium(user_id, days):
+    if user_id not in user_stats:
+        user_stats[user_id] = {
+            'searches_left': 0, 'total_searches': 0, 'found': 0, 'purchases': [], 
+            'last_hourly_add': 0, 'has_subscribed': False, 'premium_forever': False
+        }
+    if days == -1:
+        user_stats[user_id]['premium_forever'] = True
+        if 'premium_until' in user_stats[user_id]:
+            del user_stats[user_id]['premium_until']
+        msg = "💎 ПРЕМИУМ НАВСЕГДА АКТИВИРОВАН!"
+    else:
+        current_premium = user_stats[user_id].get('premium_until')
+        if current_premium:
+            if isinstance(current_premium, str):
+                current_premium = datetime.fromisoformat(current_premium)
+            new_date = max(datetime.now(), current_premium) + timedelta(days=days)
         else:
-            user_stats[user_id]['searches_left'] += tariff['searches']
-            msg = f"✅ ОПЛАЧЕНО! Начислено {tariff['searches']} поисков."
-        user_stats[user_id].setdefault('purchases', []).append({
-            'date': datetime.now().isoformat(), 'amount': amount, 'tariff': tariff['name']
-        })
-        save_data()
-        try:
-            bot.send_message(int(user_id), msg)
-        except:
-            pass
-        return True
-    return False
+            new_date = datetime.now() + timedelta(days=days)
+        user_stats[user_id]['premium_until'] = new_date
+        msg = f"💎 ПРЕМИУМ АКТИВИРОВАН НА {days} ДНЕЙ!"
+    user_stats[user_id].setdefault('purchases', []).append({
+        'date': datetime.now().isoformat(), 'type': 'premium', 'days': days
+    })
+    save_data()
+    try:
+        bot.send_message(int(user_id), msg)
+    except:
+        pass
+    return True
 
 def check_subscription(user_id):
-    """Проверяет, подписан ли пользователь на канал"""
     try:
         member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
         return member.status in ['member', 'administrator', 'creator']
-    except Exception as e:
-        print(f"Ошибка проверки подписки для {user_id}: {e}")
+    except:
         return False
 
 def add_bonus_for_subscription(user_id):
-    """Добавляет бонусные 2 поиска за подписку"""
     if user_id in user_stats and not user_stats[user_id].get('has_subscribed', False):
         user_stats[user_id]['searches_left'] += 2
         user_stats[user_id]['has_subscribed'] = True
         save_data()
         try:
-            bot.send_message(int(user_id), "🎁 Благодарим за подписку! Вам начислено +2 поиска!")
+            bot.send_message(int(user_id), "🎁 Спасибо за подписку! +2 поиска начислено!")
         except:
             pass
         return True
@@ -200,7 +226,7 @@ def hourly_free_searches():
         print(f"🕐 Ежечасное начисление: {datetime.now()}")
         updated = 0
         for user_id, data in user_stats.items():
-            if data.get('unlimited'):
+            if is_premium(user_id):
                 continue
             last = data.get('last_hourly_add', 0)
             if now - last < 3600:
@@ -218,12 +244,10 @@ def hourly_free_searches():
         if updated:
             save_data()
             print(f"✅ Начислено {updated} пользователям")
-        else:
-            print("❌ Никому не начислено")
 
 hourly_thread = threading.Thread(target=hourly_free_searches, daemon=True)
 hourly_thread.start()
-print("✅ Ежечасное начисление поисков запущено")
+print("✅ Ежечасное начисление запущено")
 
 def is_valid_username(username):
     if not username or len(username) < 5 or len(username) > 32:
@@ -252,115 +276,169 @@ def generate_username(mode, length=5):
             return username
     return ''.join(random.choice(all_letters) for _ in range(length))
 
-def check_username_telegram(username):
+def check_username(username):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        try:
-            r = scraper.get(f"https://t.me/{username}", headers=headers, timeout=10, allow_redirects=True)
-        except:
-            r = requests.get(f"https://t.me/{username}", headers=headers, timeout=10, allow_redirects=True)
-        if r.status_code == 404:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept-Language': 'ru-RU,ru;q=0.9',
+        }
+        response = requests.get(f"https://t.me/{username}", headers=headers, timeout=5)
+        
+        if response.status_code == 404:
             return True
-        if r.status_code in [301,302,303,307,308] and ('telegram.org' in r.url or r.url.endswith('/')):
+        if response.status_code in [301, 302, 303, 307, 308]:
             return True
-        if r.status_code == 200:
-            soup = BeautifulSoup(r.text, 'html.parser')
-            if soup.find('div', class_='tgme_page_title') or soup.find('div', class_='tgme_channel_info'):
+        if response.status_code == 200:
+            if 'tgme_page_title' in response.text or 'subscribers' in response.text:
                 return False
-            text = soup.get_text().lower()
-            if any(p in text for p in ['if you have telegram', "doesn't exist", 'не существует', 'страница не найдена']):
-                return True
-            if any(p in text for p in ['subscribers', 'members', 'online', 'created', 'создан', 'подписчиков']):
-                return False
+            return True
         return False
     except:
         return False
 
-def check_username_fragment(username):
-    try:
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
-        try:
-            driver.get(f"https://fragment.com/username/{username}")
-            time.sleep(3)
-            src = driver.page_source.lower()
-            title = driver.title.lower()
-            if "auction" in title or "аукцион" in title:
-                return "auction"
-            if "for sale" in src or "продажа" in src:
-                return "available"
-            try:
-                if driver.find_element(By.XPATH, "//*[contains(text(), 'Buy') or contains(text(), 'Купить')]"):
-                    return "available"
-            except:
-                pass
-            if "not found" in src or "не найдено" in src:
-                return "taken"
-            return "unknown"
-        finally:
-            driver.quit()
-    except:
-        return "error"
-
-def check_username_complete(username):
-    if check_username_telegram(username):
-        return True
-    frag = check_username_fragment(username)
-    return frag in ["available", "auction"]
-
-def check_username_parallel(username):
-    return username, check_username_complete(username)
-
-def search_three_usernames(chat_id, mode, mode_name, user_info, length):
+def search_username(chat_id, mode, mode_name, user_info, length):
     user_id = user_info['id']
     search_active[user_id] = True
-    SEARCH_COST, RESULTS_COUNT = 1, 3
+    SEARCH_COST, RESULTS_COUNT = 1, 1
+    
+    stop_markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    stop_markup.add(types.KeyboardButton("⏹ СТОП"))
+    bot.send_message(chat_id, f"🔍 Ищу {RESULTS_COUNT} {mode_name} длиной {length}...\n⏹ Нажми СТОП для остановки", reply_markup=stop_markup)
     msg = bot.send_message(chat_id, f"🔍 Ищу {RESULTS_COUNT} {mode_name} длиной {length}...")
-    if not user_info['stats']['unlimited'] and user_info['stats']['searches_left'] < SEARCH_COST:
-        bot.send_message(chat_id, f"❌ Недостаточно поисков. Нужно: {SEARCH_COST}")
+    
+    if not is_premium(user_id) and user_info['stats']['searches_left'] < SEARCH_COST:
+        bot.edit_message_text(f"❌ Недостаточно поисков. Нужно: {SEARCH_COST}", chat_id, msg.message_id)
         search_active[user_id] = False
+        show_main_menu(chat_id, user_info)
         return
+    
     found, checked, start = [], 0, time.time()
+    
     while len(found) < RESULTS_COUNT and search_active.get(user_id):
-        candidates = []
-        for _ in range(30):
-            u = generate_username(mode, length)
-            if u not in checked_usernames and u not in available_usernames and is_valid_username(u):
-                candidates.append(u)
-        if not candidates:
+        u = generate_username(mode, length)
+        if u in checked_usernames or u in available_usernames:
             continue
-        futures = [executor.submit(check_username_parallel, u) for u in candidates]
-        for f in as_completed(futures):
-            if not search_active.get(user_id):
-                break
-            u, avail = f.result()
-            checked += 1
-            checked_usernames.add(u)
-            if avail:
-                found.append(u)
-                available_usernames.add(u)
-                if len(found) >= RESULTS_COUNT:
-                    break
+        if not is_valid_username(u):
+            continue
+        
+        checked += 1
+        checked_usernames.add(u)
+        
+        if check_username(u):
+            found.append(u)
+            available_usernames.add(u)
+            save_data()
+            break
+        
         if checked % 5 == 0:
             try:
-                speed = checked / (time.time() - start)
-                bot.edit_message_text(f"🔍 Ищу... Найдено {len(found)}/{RESULTS_COUNT}\nПроверено: {checked} | {speed:.1f}/сек", chat_id, msg.message_id)
+                bot.edit_message_text(f"🔍 Ищу... Найдено {len(found)}/{RESULTS_COUNT}\nПроверено: {checked} | {(checked/(time.time()-start)):.1f}/сек", chat_id, msg.message_id)
             except:
                 pass
+    
     if found:
         user_info['stats']['found'] += len(found)
-        if not user_info['stats']['unlimited']:
+        if not is_premium(user_id):
             user_info['stats']['searches_left'] -= SEARCH_COST
         user_info['stats']['total_searches'] += SEARCH_COST
         save_data()
-    result = f"✅ **НАЙДЕНО {len(found)} НИКОВ:**\n\n" + "\n".join(f"{i}. @{u}" for i,u in enumerate(found,1)) + f"\n\n💰 Осталось: {user_info['stats']['searches_left'] if not user_info['stats']['unlimited'] else '∞'}" if found else "❌ НЕ НАЙДЕНО НИ ОДНОГО НИКА"
+    
+    search_time = time.time() - start
+    searches_left = "∞" if is_premium(user_id) else str(user_info['stats']['searches_left'])
+    
+    if found:
+        result_text = f"✅ **НАЙДЕН НИК:**\n\n@{found[0]}\n\n📊 Проверено: {checked} ников за {search_time:.1f}с\n💰 Осталось поисков: {searches_left}"
+    else:
+        result_text = f"❌ **НЕ НАЙДЕН НИ ОДИН НИК**\n\n📊 Проверено: {checked} ников за {search_time:.1f}с\n💰 Осталось поисков: {searches_left}"
+    
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🔄 ЕЩЕ 3", callback_data=f"search_{mode}_{length}"), types.InlineKeyboardButton("◀️ В МЕНЮ", callback_data="back_to_main"))
-    bot.edit_message_text(result, chat_id, msg.message_id, reply_markup=markup, parse_mode='Markdown')
+    markup.add(
+        types.InlineKeyboardButton("🔄 ЕЩЕ 1", callback_data=f"search_{mode}_{length}"),
+        types.InlineKeyboardButton("◀️ В МЕНЮ", callback_data="back_to_main")
+    )
+    bot.edit_message_text(result_text, chat_id, msg.message_id, reply_markup=markup, parse_mode='Markdown')
     search_active[user_id] = False
+    show_main_menu(chat_id, user_info)
+
+# ========== АДМИН КОМАНДЫ ==========
+@bot.message_handler(commands=['add'])
+def cmd_add(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Нет прав")
+        return
+    try:
+        parts = message.text.split()
+        if len(parts) != 3:
+            bot.reply_to(message, "❌ /add 123456789 10")
+            return
+        user_id = parts[1]
+        count = int(parts[2])
+        if user_id in user_stats:
+            user_stats[user_id]['searches_left'] += count
+            save_data()
+            bot.reply_to(message, f"✅ +{count} поисков пользователю {user_id}")
+            try:
+                bot.send_message(int(user_id), f"✅ Админ добавил тебе {count} поисков!")
+            except:
+                pass
+        else:
+            bot.reply_to(message, f"❌ Пользователь {user_id} не найден")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+@bot.message_handler(commands=['premium'])
+def cmd_premium(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Нет прав")
+        return
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "❌ /premium 123456789 30 (или -1 для навсегда)")
+            return
+        user_id = parts[1]
+        days = int(parts[2]) if len(parts) > 2 else -1
+        add_premium(user_id, days)
+        bot.reply_to(message, f"✅ Премиум выдан {user_id} на {days if days != -1 else 'НАВСЕГДА'}")
+        try:
+            if days == -1:
+                bot.send_message(int(user_id), "💎 Админ выдал тебе ПРЕМИУМ НАВСЕГДА!")
+            else:
+                bot.send_message(int(user_id), f"💎 Админ выдал тебе ПРЕМИУМ на {days} дней!")
+        except:
+            pass
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+@bot.message_handler(commands=['user'])
+def cmd_user(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Нет прав")
+        return
+    try:
+        parts = message.text.split()
+        if len(parts) != 2:
+            bot.reply_to(message, "❌ /user 123456789")
+            return
+        user_id = parts[1]
+        if user_id in user_stats:
+            s = user_stats[user_id]
+            premium_status = "✅ ДА" if is_premium(user_id) else "❌ НЕТ"
+            text = f"👤 ПОЛЬЗОВАТЕЛЬ {user_id}\n📅 Регистрация: {s.get('first_seen', '')[:10]}\n💰 Поисков: {s.get('searches_left', 0)}\n💎 Премиум: {premium_status}\n✅ Найдено: {s.get('found', 0)}"
+            bot.reply_to(message, text)
+        else:
+            bot.reply_to(message, f"❌ Пользователь {user_id} не найден")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+@bot.message_handler(commands=['stats'])
+def cmd_stats(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Нет прав")
+        return
+    premium_count = sum(1 for uid in user_stats if is_premium(uid))
+    text = f"📊 СТАТИСТИКА\n\n✅ Найдено ников: {len(available_usernames)}\n👥 Пользователей: {len(user_stats)}\n💎 Премиум: {premium_count}\n🔍 Проверено ников: {len(checked_usernames)}"
+    bot.reply_to(message, text)
 
 # ========== ОБРАБОТКА КОЛБЭКОВ ==========
 @bot.callback_query_handler(func=lambda call: True)
@@ -370,316 +448,150 @@ def handle_callback(call):
     user_id = user_info['id']
     
     try:
-        # ===== ПРОВЕРКА ПОДПИСКИ =====
-        if call.data == "check_subscription":
+        if call.data == "bonus_subscribe":
+            if user_info['stats'].get('has_subscribed', False):
+                bot.answer_callback_query(call.id, "❌ Вы уже получали бонус!")
+                bot.delete_message(chat_id, call.message.message_id)
+                show_main_menu(chat_id, user_info)
+                return
             if check_subscription(user_id):
-                bot.answer_callback_query(call.id, "✅ Подписка подтверждена! +2 поиска")
                 add_bonus_for_subscription(user_id)
+                bot.answer_callback_query(call.id, "✅ Подписка подтверждена! +2 поиска")
                 bot.delete_message(chat_id, call.message.message_id)
                 show_main_menu(chat_id, user_info)
             else:
-                bot.answer_callback_query(call.id, "❌ Вы не подписаны на канал! Подпишитесь и нажмите снова.")
+                bot.answer_callback_query(call.id, "❌ Вы не подписаны на канал!")
         
-        # ===== ВЫБОР ВАЛЮТЫ =====
-        elif call.data == "currency_rub":
-            bot.answer_callback_query(call.id, "🇷🇺 Выбраны рубли")
-            bot.delete_message(chat_id, call.message.message_id)
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            markup.add(
-                types.InlineKeyboardButton(f"🔹 1 ПОИСК — {PRICES_RUB['1']}₽", callback_data="pay_rub_1"),
-                types.InlineKeyboardButton(f"🔸 3 ПОИСКА — {PRICES_RUB['3']}₽", callback_data="pay_rub_3"),
-                types.InlineKeyboardButton(f"🔹 10 ПОИСКОВ — {PRICES_RUB['10']}₽", callback_data="pay_rub_10"),
-                types.InlineKeyboardButton(f"💎 БЕЗЛИМИТ — {PRICES_RUB['unlimited']}₽", callback_data="pay_rub_unlimited"),
-                types.InlineKeyboardButton("◀️ НАЗАД", callback_data="back_to_payment")
-            )
-            bot.send_message(
-                chat_id,
-                f"💳 **ВЫБЕРИ ТАРИФ (РУБЛИ)**\n\n"
-                f"👤 Твой ID: `{user_id}`\n\n"
-                f"▫️ 1 поиск (3 ника) — {PRICES_RUB['1']}₽\n"
-                f"▫️ 3 поиска (9 ников) — {PRICES_RUB['3']}₽\n"
-                f"▫️ 10 поисков (30 ников) — {PRICES_RUB['10']}₽\n"
-                f"▫️ Безлимит — {PRICES_RUB['unlimited']}₽",
-                reply_markup=markup,
-                parse_mode='Markdown'
-            )
-        
-        elif call.data == "currency_stars":
-            bot.answer_callback_query(call.id, "⭐️ Выбраны звёзды")
-            bot.delete_message(chat_id, call.message.message_id)
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            markup.add(
-                types.InlineKeyboardButton(f"🔹 1 ПОИСК — {PRICES_STARS['1']}⭐️", callback_data="pay_stars_1"),
-                types.InlineKeyboardButton(f"🔸 3 ПОИСКА — {PRICES_STARS['3']}⭐️", callback_data="pay_stars_3"),
-                types.InlineKeyboardButton(f"🔹 10 ПОИСКОВ — {PRICES_STARS['10']}⭐️", callback_data="pay_stars_10"),
-                types.InlineKeyboardButton(f"💎 БЕЗЛИМИТ — {PRICES_STARS['unlimited']}⭐️", callback_data="pay_stars_unlimited"),
-                types.InlineKeyboardButton("◀️ НАЗАД", callback_data="back_to_payment")
-            )
-            bot.send_message(
-                chat_id,
-                f"⭐️ **ВЫБЕРИ ТАРИФ (ЗВЁЗДЫ)**\n\n"
-                f"👤 Твой ID: `{user_id}`\n\n"
-                f"▫️ 1 поиск (3 ника) — {PRICES_STARS['1']}⭐️\n"
-                f"▫️ 3 поиска (9 ников) — {PRICES_STARS['3']}⭐️\n"
-                f"▫️ 10 поисков (30 ников) — {PRICES_STARS['10']}⭐️\n"
-                f"▫️ Безлимит — {PRICES_STARS['unlimited']}⭐️",
-                reply_markup=markup,
-                parse_mode='Markdown'
-            )
-        
-        elif call.data == "back_to_payment":
+        elif call.data == "buy_searches":
             bot.answer_callback_query(call.id)
             bot.delete_message(chat_id, call.message.message_id)
-            markup = types.InlineKeyboardMarkup(row_width=2)
-            markup.add(
-                types.InlineKeyboardButton("🇷🇺 РУБЛИ (через @send)", callback_data="currency_rub"),
-                types.InlineKeyboardButton("⭐️ ЗВЁЗДЫ (поддержка)", callback_data="currency_stars")
-            )
-            bot.send_message(
-                chat_id,
-                f"💳 **ВЫБЕРИ СПОСОБ ОПЛАТЫ**\n\n"
-                f"👤 Твой ID: `{user_id}`\n\n"
-                f"🇷🇺 **Рубли** — оплата через @send (чеки)\n"
-                f"⭐️ **Звёзды** — оплата внутренней валютой Telegram\n\n"
-                f"При оплате звёздами напиши в поддержку {SUPPORT_USERNAME}",
-                reply_markup=markup,
-                parse_mode='Markdown'
-            )
+            user_states[user_id] = {'state': 'waiting_search_amount'}
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("◀️ НАЗАД", callback_data="back_to_shop"))
+            bot.send_message(chat_id, f"🔍 ПОКУПКА ПОИСКОВ\n\n💰 Цена: {SEARCH_PRICE_STARS}⭐️ / {SEARCH_PRICE_RUB}₽ за 1 поиск\n📞 Купить: {SUPPORT_USERNAME}\n\n✏️ Введите количество (1-1000):", reply_markup=markup)
         
-        # ===== ОПЛАТА В РУБЛЯХ =====
-        elif call.data.startswith("pay_rub_"):
-            tariff_key = call.data.replace("pay_rub_", "")
-            amount = PRICES_RUB[tariff_key]
-            tariff_name = {"1":"1 поиск (3 ника)","3":"3 поиска (9 ников)","10":"10 поисков (30 ников)","unlimited":"Безлимит"}[tariff_key]
-            pay_link = PAYMENT_LINKS_RUB.get(amount, "https://t.me/send")
-            
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            markup.add(
-                types.InlineKeyboardButton(f"💳 ОПЛАТИТЬ {amount}₽ ЧЕРЕЗ @send", url=pay_link),
-                types.InlineKeyboardButton("✅ Я ОПЛАТИЛ", callback_data=f"confirm_payment_rub_{tariff_key}"),
-                types.InlineKeyboardButton("◀️ НАЗАД К ТАРИФАМ", callback_data="back_to_payment")
-            )
-            
-            bot.answer_callback_query(call.id, f"✅ Выбран тариф {tariff_name}")
+        elif call.data == "back_to_shop":
+            bot.answer_callback_query(call.id)
             bot.delete_message(chat_id, call.message.message_id)
-            bot.send_message(
-                chat_id,
-                f"💎 **ОПЛАТА В РУБЛЯХ: {tariff_name}**\n\n"
-                f"💰 Сумма: {amount}₽\n"
-                f"👤 Твой ID: `{user_id}`\n\n"
-                f"📝 **ИНСТРУКЦИЯ:**\n\n"
-                f"1️⃣ Нажми кнопку оплаты\n"
-                f"2️⃣ В открывшемся чате с @send создай чек на {amount}₽\n"
-                f"3️⃣ В комментарии к чеку **ОБЯЗАТЕЛЬНО** укажи свой ID: `{user_id}`\n"
-                f"4️⃣ Оплати чек любым способом\n"
-                f"5️⃣ После оплаты нажми «✅ Я ОПЛАТИЛ»\n"
-                f"6️⃣ Админ проверит оплату и начислит поиски\n\n"
-                f"❓ Проблемы: {SUPPORT_USERNAME}",
-                reply_markup=markup,
-                parse_mode='Markdown'
-            )
+            if user_id in user_states:
+                del user_states[user_id]
+            show_shop_menu(chat_id, user_info)
         
-        # ===== ОПЛАТА ЗВЁЗДАМИ =====
-        elif call.data.startswith("pay_stars_"):
-            tariff_key = call.data.replace("pay_stars_", "")
-            stars_amount = PRICES_STARS[tariff_key]
-            tariff_name = {"1":"1 поиск (3 ника)","3":"3 поиска (9 ников)","10":"10 поисков (30 ников)","unlimited":"Безлимит"}[tariff_key]
-            
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            markup.add(
-                types.InlineKeyboardButton("📩 НАПИСАТЬ ПОДДЕРЖКЕ", url=f"https://t.me/{SUPPORT_USERNAME.replace('@', '')}"),
-                types.InlineKeyboardButton("◀️ НАЗАД К ТАРИФАМ", callback_data="back_to_payment")
-            )
-            
-            bot.answer_callback_query(call.id, f"⭐️ Выбран тариф {tariff_name}")
+        elif call.data == "buy_premium":
+            bot.answer_callback_query(call.id)
             bot.delete_message(chat_id, call.message.message_id)
-            bot.send_message(
-                chat_id,
-                f"⭐️ **ОПЛАТА ЗВЁЗДАМИ: {tariff_name}**\n\n"
-                f"💰 Цена: {stars_amount} ⭐️\n"
-                f"👤 Твой ID: `{user_id}`\n\n"
-                f"📝 **ИНСТРУКЦИЯ:**\n\n"
-                f"1️⃣ Напиши в поддержку {SUPPORT_USERNAME}\n"
-                f"2️⃣ Укажи свой ID: `{user_id}`\n"
-                f"3️⃣ Укажи желаемый тариф: {tariff_name}\n"
-                f"4️⃣ Админ пришлёт ссылку на оплату звёздами\n"
-                f"5️⃣ После оплаты поиски начислятся автоматически\n\n"
-                f"❓ Вопросы: {SUPPORT_USERNAME}",
-                reply_markup=markup,
-                parse_mode='Markdown'
-            )
+            show_premium_menu(chat_id, user_info)
         
-        # ===== ПОДТВЕРЖДЕНИЕ ОПЛАТЫ РУБЛЯМИ =====
-        elif call.data.startswith("confirm_payment_rub_"):
-            tariff_key = call.data.replace("confirm_payment_rub_", "")
-            amount = int(PRICES_RUB[tariff_key])
-            tariff = TARIFFS[amount]
+        elif call.data.startswith("premium_"):
+            key = call.data.replace("premium_", "")
+            price_rub = PREMIUM_PRICES[key]["price_rub"]
+            price_stars = PREMIUM_PRICES[key]["price_stars"]
             
-            admin_markup = types.InlineKeyboardMarkup(row_width=2)
-            admin_markup.add(
-                types.InlineKeyboardButton(f"✅ ВЫДАТЬ {tariff['searches'] if tariff['searches']>0 else 'БЕЗЛИМИТ'}", callback_data=f"admin_give_{user_id}_{amount}"),
-                types.InlineKeyboardButton("❌ ОТКАЗАТЬ", callback_data="admin_deny")
-            )
+            name_map = {
+                "1d": "1 день", "3d": "3 дня", "7d": "7 дней",
+                "1m": "1 месяц", "3m": "3 месяца", "1y": "1 год", "forever": "Навсегда"
+            }
+            name = name_map.get(key, key)
             
-            try:
-                bot.send_message(
-                    ADMIN_ID,
-                    f"💰 ЗАПРОС НА ПРОВЕРКУ ОПЛАТЫ (Рубли)\n\n"
-                    f"👤 {user_info['username']}\n"
-                    f"🆔 ID: {user_id}\n"
-                    f"💰 Сумма: {amount}₽\n"
-                    f"📦 Тариф: {tariff['name']}\n"
-                    f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                    reply_markup=admin_markup
-                )
-                bot.answer_callback_query(call.id, "✅ Запрос отправлен админу!")
-                bot.send_message(chat_id, f"✅ Запрос отправлен! Админ {SUPPORT_USERNAME} проверит оплату.")
-            except Exception as e:
-                print(f"Ошибка при отправке админу: {e}")
-                bot.answer_callback_query(call.id, "❌ Не удалось отправить запрос админу.")
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("📩 НАПИСАТЬ ПОДДЕРЖКЕ", url=f"https://t.me/{SUPPORT_USERNAME.replace('@', '')}"))
+            markup.add(types.InlineKeyboardButton("◀️ НАЗАД", callback_data="buy_premium"))
+            bot.answer_callback_query(call.id)
+            bot.delete_message(chat_id, call.message.message_id)
+            bot.send_message(chat_id, f"💎 ПОКУПКА ПРЕМИУМ\n\n📦 Тариф: {name}\n💰 Цена: {price_stars}⭐️ / {price_rub}₽\n👤 ID: {user_id}\n\n📞 Для оплаты напишите в поддержку:\n{SUPPORT_USERNAME}", reply_markup=markup)
         
-        # ===== ПОИСК НИКОВ =====
         elif call.data.startswith("search_"):
             parts = call.data.split("_")
             if len(parts) >= 3:
                 mode, length = parts[1], int(parts[2])
                 mode_name = {"pattern":"Паттерн","digits":"С цифрами","combo":"Комбо"}.get(mode, mode)
+                
+                if not is_premium(user_id) and mode != "combo":
+                    bot.answer_callback_query(call.id, "❌ Для FREE пользователей доступен только режим КОМБО!\n💎 Купи PREMIUM для доступа к ПАТТЕРН и С ЦИФРАМИ")
+                    return
+                
                 if search_active.get(user_id):
                     bot.answer_callback_query(call.id, "⏳ Поиск уже идет")
                     return
                 if not can_search(user_info):
                     bot.answer_callback_query(call.id, "❌ Нет поисков")
                     bot.delete_message(chat_id, call.message.message_id)
-                    markup = types.InlineKeyboardMarkup(row_width=2)
-                    markup.add(
-                        types.InlineKeyboardButton("🇷🇺 РУБЛИ", callback_data="currency_rub"),
-                        types.InlineKeyboardButton("⭐️ ЗВЁЗДЫ", callback_data="currency_stars")
-                    )
-                    bot.send_message(chat_id, "❌ У тебя закончились поиски! Пополни баланс:", reply_markup=markup)
+                    show_shop_menu(chat_id, user_info)
                     return
-                bot.answer_callback_query(call.id, f"🔄 Ищу 3 {mode_name}...")
+                bot.answer_callback_query(call.id, f"🔄 Ищу...")
                 bot.delete_message(chat_id, call.message.message_id)
-                threading.Thread(target=search_three_usernames, args=(chat_id, mode, mode_name, user_info, length), daemon=True).start()
-        
-        # ===== АДМИН КОМАНДЫ =====
-        elif call.data.startswith("admin_give_"):
-            if call.from_user.id != ADMIN_ID:
-                bot.answer_callback_query(call.id, "❌ Только для админа")
-                return
-            parts = call.data.split("_")
-            if len(parts) >= 4:
-                target_user_id = parts[2]
-                amount = int(parts[3])
-                if add_searches(target_user_id, amount):
-                    bot.answer_callback_query(call.id, "✅ Поиски начислены!")
-                    bot.edit_message_reply_markup(ADMIN_ID, call.message.message_id, reply_markup=None)
-                    searches_text = TARIFFS[amount]['searches'] if amount != 1000 else 'безлимит'
-                    bot.send_message(ADMIN_ID, f"✅ Пользователю {target_user_id} начислено {searches_text} поисков.")
-                else:
-                    bot.answer_callback_query(call.id, "❌ Ошибка начисления")
-        
-        elif call.data == "admin_deny":
-            if call.from_user.id != ADMIN_ID:
-                bot.answer_callback_query(call.id, "❌ Только для админа")
-                return
-            bot.answer_callback_query(call.id, "❌ Отказано")
-            bot.edit_message_reply_markup(ADMIN_ID, call.message.message_id, reply_markup=None)
-        
-        elif call.data == "stop_search":
-            if search_active.get(user_id):
-                search_active[user_id] = False
-                bot.answer_callback_query(call.id, "⏹ Останавливаю...")
-            else:
-                bot.answer_callback_query(call.id, "❌ Поиск не активен")
+                threading.Thread(target=search_username, args=(chat_id, mode, mode_name, user_info, length), daemon=True).start()
         
         elif call.data == "back_to_main":
             bot.answer_callback_query(call.id)
             bot.delete_message(chat_id, call.message.message_id)
             show_main_menu(chat_id, user_info)
         
-        else:
-            bot.answer_callback_query(call.id, "❌ Неизвестная команда")
-            
     except Exception as e:
-        print(f"Ошибка в callback: {e}")
+        print(f"Ошибка: {e}")
         try:
-            bot.answer_callback_query(call.id, "❌ Ошибка. Попробуй ещё раз.")
+            bot.answer_callback_query(call.id, "❌ Ошибка")
         except:
             pass
 
-@bot.message_handler(commands=['give','add','user'])
-def admin_commands(message):
-    if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "❌ Нет прав")
-        return
-    cmd = message.text.split()[0].lower()
-    if cmd == '/give':
-        try:
-            user_id = message.text.split()[1]
-            if user_id in user_stats:
-                user_stats[user_id]['unlimited'] = True
-                user_stats[user_id]['searches_left'] = 0
-                save_data()
-                bot.reply_to(message, f"✅ Безлимит выдан {user_id}")
-                try:
-                    bot.send_message(int(user_id), "🎉 Админ выдал тебе БЕЗЛИМИТ!")
-                except:
-                    pass
-            else:
-                bot.reply_to(message, "❌ Пользователь не найден")
-        except:
-            bot.reply_to(message, "❌ /give 123456789")
-    elif cmd == '/add':
-        try:
-            _, user_id, count = message.text.split()
-            count = int(count)
-            if user_id in user_stats:
-                user_stats[user_id]['searches_left'] += count
-                save_data()
-                bot.reply_to(message, f"✅ Добавлено {count} поисков {user_id}")
-                try:
-                    bot.send_message(int(user_id), f"✅ Админ добавил {count} поисков!")
-                except:
-                    pass
-            else:
-                bot.reply_to(message, "❌ Пользователь не найден")
-        except:
-            bot.reply_to(message, "❌ /add 123456789 10")
-    elif cmd == '/user':
-        try:
-            user_id = message.text.split()[1]
-            if user_id in user_stats:
-                s = user_stats[user_id]
-                text = f"👤 Пользователь {user_id}\n📅 Регистрация: {s.get('first_seen','')[:10]}\n💰 Поисков: {s.get('searches_left',0)}\n💎 Безлимит: {'✅' if s.get('unlimited') else '❌'}\n✅ Найдено: {s.get('found',0)}\n🔄 Всего поисков: {s.get('total_searches',0)}"
-                bot.reply_to(message, text)
-            else:
-                bot.reply_to(message, "❌ Не найден")
-        except:
-            bot.reply_to(message, "❌ /user 123456789")
+def show_shop_menu(chat_id, user_info):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("🔍 КУПИТЬ ПОИСКИ", callback_data="buy_searches"),
+        types.InlineKeyboardButton("💎 КУПИТЬ ПРЕМИУМ", callback_data="buy_premium"),
+        types.InlineKeyboardButton("◀️ В МЕНЮ", callback_data="back_to_main")
+    )
+    bot.send_message(chat_id, f"🛒 МАГАЗИН\n\n👤 ID: {user_info['id']}\n\nВыберите категорию:", reply_markup=markup)
+
+def show_premium_menu(chat_id, user_info):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton(f"💎 1 день — 15⭐️/20₽", callback_data="premium_1d"),
+        types.InlineKeyboardButton(f"💎 3 дня — 45⭐️/60₽", callback_data="premium_3d"),
+        types.InlineKeyboardButton(f"💎 7 дней — 100⭐️/140₽", callback_data="premium_7d"),
+        types.InlineKeyboardButton(f"💎 1 месяц — 450⭐️/600₽", callback_data="premium_1m"),
+        types.InlineKeyboardButton(f"💎 3 месяца — 1350⭐️/1800₽", callback_data="premium_3m"),
+        types.InlineKeyboardButton(f"💎 1 год — 4500⭐️/6000₽", callback_data="premium_1y"),
+        types.InlineKeyboardButton(f"💎 Навсегда — 6000⭐️/8000₽", callback_data="premium_forever"),
+        types.InlineKeyboardButton("◀️ НАЗАД", callback_data="back_to_shop")
+    )
+    bot.send_message(chat_id, f"💎 ПОКУПКА ПРЕМИУМ\n\n👤 ID: {user_info['id']}\n\nВыберите срок:", reply_markup=markup)
 
 def show_main_menu(chat_id, user_info):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add("🎯 ПАТТЕРН", "🔢 С ЦИФРАМИ", "⚡️ КОМБО", "⏹ СТОП")
-    markup.add("📊 СТАТИСТИКА", "💎 КУПИТЬ", "👤 ПРОФИЛЬ", "📞 ПОДДЕРЖКА")
-    searches = "∞" if user_info['stats']['unlimited'] else str(user_info['stats']['searches_left'])
-    bot.send_message(chat_id, f"🔍 ПОИСК НИКОВ\n\n💰 Поисков: {searches} (1 поиск = 3 ника)\n📊 Всего найдено: {len(available_usernames)}\n\n👇 Выбери режим:", reply_markup=markup)
-
-def show_subscription_required(chat_id, user_id):
-    """Показывает сообщение о необходимости подписки"""
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("📢 ПЕРЕЙТИ В КАНАЛ", url=REQUIRED_CHANNEL_LINK))
-    markup.add(types.InlineKeyboardButton("✅ Я ПОДПИСАЛСЯ", callback_data="check_subscription"))
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
+    markup.add("🎯 ПАТТЕРН", "🔢 С ЦИФРАМИ", "⚡️ КОМБО")
+    markup.add("📊 СТАТИСТИКА", "🛒 МАГАЗИН", "👤 ПРОФИЛЬ")
+    markup.add("📞 ПОДДЕРЖКА", "🎁 БОНУСЫ")
     
-    bot.send_message(
-        chat_id,
-        f"🔒 **ДОСТУП ОГРАНИЧЕН**\n\n"
-        f"Для использования бота необходимо подписаться на наш канал:\n"
-        f"👉 {REQUIRED_CHANNEL_LINK}\n\n"
-        f"✅ После подписки нажмите кнопку «Я ПОДПИСАЛСЯ»\n\n"
-        f"🎁 **Бонус:** +2 поиска за подписку!",
-        reply_markup=markup,
-        parse_mode='Markdown'
+    searches = "∞" if is_premium(user_info['id']) else str(user_info['stats']['searches_left'])
+    
+    if not is_premium(user_info['id']):
+        menu_text = f"🔍 ПОИСК НИКОВ\n\n💰 Поисков: {searches} (1 поиск = 1 ник)\n📊 Найдено: {len(available_usernames)}\n\n⚠️ FREE режим: доступен только ⚡️ КОМБО\n💎 Купи PREMIUM для доступа ко всем режимам!\n\n👇 Выбери режим:"
+    else:
+        menu_text = f"🔍 ПОИСК НИКОВ\n\n💰 Поисков: {searches} (1 поиск = 1 ник)\n📊 Найдено: {len(available_usernames)}\n💎 PREMIUM: все режимы доступны\n\n👇 Выбери режим:"
+    
+    bot.send_message(chat_id, menu_text, reply_markup=markup)
+
+def show_bonus_menu(chat_id, user_info):
+    user_id = user_info['id']
+    is_subscribed = check_subscription(user_id)
+    has_bonus = user_info['stats'].get('has_subscribed', False)
+    
+    if has_bonus:
+        bot.send_message(chat_id, f"🎁 БОНУСЫ\n\n✅ Вы уже получали бонус за подписку!\n\n📢 Канал: {REQUIRED_CHANNEL_LINK}")
+        return
+    if is_subscribed and not has_bonus:
+        add_bonus_for_subscription(user_id)
+        bot.send_message(chat_id, f"🎁 БОНУСЫ\n\n✅ Подписка подтверждена! Вам начислено +2 поиска!\n\n📢 Канал: {REQUIRED_CHANNEL_LINK}")
+        show_main_menu(chat_id, user_info)
+        return
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("📢 ПОДПИСАТЬСЯ НА КАНАЛ", url=REQUIRED_CHANNEL_LINK),
+        types.InlineKeyboardButton("🎁 ПОЛУЧИТЬ БОНУС (+2 поиска)", callback_data="bonus_subscribe")
     )
+    bot.send_message(chat_id, f"🎁 БОНУСЫ\n\nПодпишись на наш канал и получи +2 поиска!\n\n📢 {REQUIRED_CHANNEL_LINK}\n\n👇 Нажми кнопку после подписки:", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: True)
 def handle_buttons(message):
@@ -688,44 +600,60 @@ def handle_buttons(message):
     user_id = user_info['id']
     text = message.text
     
-    print(f"📩 Нажата кнопка: {text} от {user_id}")
+    print(f"📩 Сообщение: {text} от {user_id}")
+    
+    if user_id in user_states and user_states[user_id].get('state') == 'waiting_search_amount':
+        try:
+            amount = int(text)
+            if amount < 1 or amount > 1000:
+                bot.send_message(chat_id, "❌ Введите число от 1 до 1000")
+                return
+            price_rub = amount * SEARCH_PRICE_RUB
+            price_stars = amount * SEARCH_PRICE_STARS
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("📩 НАПИСАТЬ ПОДДЕРЖКЕ", url=f"https://t.me/{SUPPORT_USERNAME.replace('@', '')}"))
+            markup.add(types.InlineKeyboardButton("◀️ В МАГАЗИН", callback_data="back_to_shop"))
+            bot.send_message(chat_id, f"🔍 ПОКУПКА ПОИСКОВ\n\n📦 Количество: {amount} поисков\n💰 Цена: {price_stars}⭐️ / {price_rub}₽\n👤 ID: {user_id}\n\n📞 Для оплаты напишите в поддержку:\n{SUPPORT_USERNAME}", reply_markup=markup)
+            del user_states[user_id]
+        except:
+            bot.send_message(chat_id, "❌ Введите целое число")
+        return
     
     if text == "⏹ СТОП":
         if search_active.get(user_id):
             search_active[user_id] = False
-            bot.send_message(chat_id, "⏹ Останавливаю...")
+            bot.send_message(chat_id, "⏹ Поиск остановлен!")
+            show_main_menu(chat_id, user_info)
         else:
             bot.send_message(chat_id, "❌ Нет активного поиска")
+        return
     
-    elif text == "📞 ПОДДЕРЖКА":
-        bot.send_message(chat_id, f"📞 ПОДДЕРЖКА\n👤 Твой ID: `{user_id}`\n💬 {SUPPORT_USERNAME}", parse_mode='Markdown')
+    if text == "📞 ПОДДЕРЖКА":
+        bot.send_message(chat_id, f"📞 ПОДДЕРЖКА\n\n👤 Твой ID: {user_id}\n💬 Связь: {SUPPORT_USERNAME}\n\n📧 Email: support@tagforce.com\n\n⏱ Время ответа: до 24 часов")
+        return
     
-    elif text == "💎 КУПИТЬ":
+    if text == "🎁 БОНУСЫ":
+        show_bonus_menu(chat_id, user_info)
+        return
+    
+    if text == "🛒 МАГАЗИН":
         if search_active.get(user_id):
             bot.send_message(chat_id, "⚠️ Сначала останови поиск кнопкой ⏹ СТОП")
             return
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("🇷🇺 РУБЛИ (через @send)", callback_data="currency_rub"),
-            types.InlineKeyboardButton("⭐️ ЗВЁЗДЫ (поддержка)", callback_data="currency_stars")
-        )
-        bot.send_message(
-            chat_id,
-            f"💳 **ВЫБЕРИ СПОСОБ ОПЛАТЫ**\n\n"
-            f"👤 Твой ID: `{user_id}`\n\n"
-            f"🇷🇺 **Рубли** — оплата через @send (чеки)\n"
-            f"⭐️ **Звёзды** — оплата внутренней валютой Telegram\n\n"
-            f"После выбора тарифа следуй инструкции.",
-            reply_markup=markup,
-            parse_mode='Markdown'
-        )
+        show_shop_menu(chat_id, user_info)
+        return
     
-    elif text in ["🎯 ПАТТЕРН", "🔢 С ЦИФРАМИ", "⚡️ КОМБО"]:
+    if text in ["🎯 ПАТТЕРН", "🔢 С ЦИФРАМИ", "⚡️ КОМБО"]:
         if search_active.get(user_id):
             bot.send_message(chat_id, "⚠️ Сначала останови поиск кнопкой ⏹ СТОП")
             return
         
         mode = {"🎯 ПАТТЕРН":"pattern","🔢 С ЦИФРАМИ":"digits","⚡️ КОМБО":"combo"}[text]
+        
+        if not is_premium(user_id) and mode != "combo":
+            bot.send_message(chat_id, "❌ Для FREE пользователей доступен только режим КОМБО!\n💎 Купи PREMIUM для доступа к ПАТТЕРН и С ЦИФРАМИ")
+            return
+        
         markup = types.InlineKeyboardMarkup(row_width=3)
         markup.add(
             types.InlineKeyboardButton("5 символов", callback_data=f"search_{mode}_5"),
@@ -733,32 +661,31 @@ def handle_buttons(message):
             types.InlineKeyboardButton("7 символов", callback_data=f"search_{mode}_7"),
             types.InlineKeyboardButton("◀️ НАЗАД", callback_data="back_to_main")
         )
-        bot.send_message(chat_id, f"Выбери длину (будет найдено 3 ника):", reply_markup=markup)
+        bot.send_message(chat_id, "📏 ВЫБЕРИ ДЛИНУ (будет найдено 1 ник)", reply_markup=markup)
+        return
     
-    elif text == "👤 ПРОФИЛЬ":
+    if text == "👤 ПРОФИЛЬ":
         s = user_info['stats']
-        status = "💎 PREMIUM" if s['unlimited'] else "👤 FREE"
-        searches = "∞" if s['unlimited'] else str(s['searches_left'])
-        bot.send_message(
-            chat_id,
-            f"👤 **ПРОФИЛЬ**\n\n"
-            f"🆔 ID: `{user_id}`\n"
-            f"📊 Статус: {status}\n"
-            f"💰 Осталось: {searches} (1 поиск = 3 ника)\n"
-            f"✅ Найдено: {s['found']}\n"
-            f"🔄 Всего поисков: {s['total_searches']}",
-            parse_mode='Markdown'
-        )
+        if is_premium(user_id):
+            if s.get('premium_forever'):
+                status = "💎 PREMIUM (НАВСЕГДА)"
+            else:
+                premium_until = s.get('premium_until')
+                if isinstance(premium_until, str):
+                    premium_until = datetime.fromisoformat(premium_until)
+                days_left = (premium_until - datetime.now()).days if premium_until else 0
+                status = f"💎 PREMIUM (осталось {days_left} дн.)"
+            searches = "∞"
+        else:
+            status = "👤 FREE"
+            searches = str(s['searches_left'])
+        bot.send_message(chat_id, f"👤 ПРОФИЛЬ\n\n🆔 ID: {user_id}\n📊 Статус: {status}\n💰 Осталось: {searches} (1 поиск = 1 ник)\n✅ Найдено: {s['found']}\n🔄 Всего поисков: {s['total_searches']}")
+        return
     
-    elif text == "📊 СТАТИСТИКА":
-        premium = sum(1 for u in user_stats.values() if u.get('unlimited'))
-        bot.send_message(
-            chat_id,
-            f"📊 **ГЛОБАЛЬНАЯ СТАТИСТИКА**\n\n"
-            f"✅ Найдено ников: {len(available_usernames)}\n"
-            f"👥 Пользователей: {len(user_stats)}\n"
-            f"💎 Премиум: {premium}"
-        )
+    if text == "📊 СТАТИСТИКА":
+        premium = sum(1 for uid in user_stats if is_premium(uid))
+        bot.send_message(chat_id, f"📊 ГЛОБАЛЬНАЯ СТАТИСТИКА\n\n✅ Найдено ников: {len(available_usernames)}\n👥 Пользователей: {len(user_stats)}\n💎 Премиум: {premium}")
+        return
     
     else:
         show_main_menu(chat_id, user_info)
@@ -767,29 +694,18 @@ def handle_buttons(message):
 def start(message):
     chat_id = message.chat.id
     user_info = get_user_info(message.from_user)
-    user_id = user_info['id']
-    
-    # Проверяем подписку
-    if not user_info['stats'].get('has_subscribed', False):
-        if check_subscription(user_id):
-            add_bonus_for_subscription(user_id)
-            show_main_menu(chat_id, user_info)
-        else:
-            show_subscription_required(chat_id, user_id)
-    else:
-        show_main_menu(chat_id, user_info)
+    show_main_menu(chat_id, user_info)
 
 if __name__ == "__main__":
     load_data()
     print("\n" + "="*80)
-    print("🤖 БОТ ЗАПУЩЕН (ОПЛАТА: РУБЛИ @send | ЗВЁЗДЫ ЧЕРЕЗ ПОДДЕРЖКУ)")
+    print("🤖 БОТ ЗАПУЩЕН")
+    print("📌 FREE: только КОМБО | PREMIUM: все режимы")
     print(f"👤 Админ: {ADMIN_ID}")
-    print(f"📞 Поддержка: {SUPPORT_USERNAME}")
-    print(f"📢 Требуется подписка на канал: {REQUIRED_CHANNEL}")
+    print("📋 АДМИН КОМАНДЫ:")
+    print("   /add 123456789 10")
+    print("   /premium 123456789 30 (-1 навсегда)")
+    print("   /user 123456789")
+    print("   /stats")
     print("="*80)
-    try:
-        bot.infinity_polling(timeout=30, long_polling_timeout=20)
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
-        time.sleep(5)
-        bot.infinity_polling()
+    bot.infinity_polling()
